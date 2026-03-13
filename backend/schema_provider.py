@@ -57,13 +57,6 @@ COLUMN_NOTES: dict[str, str] = {
     "AVG_ISF_GEN_DURATION":          "Average ISF generation duration across records",
     "AVG_DART_UI_VALIDATION_DURATION": "Average DART UI validation duration across records",
 
-    # Record counts
-    "TOTAL_RECORDS":     "Total provider records in this RO",
-    "SUCCESS_RECORDS":   "Records that processed successfully",
-    "FAILED_RECORDS":    "Records that failed processing",
-    "SKIPPED_RECORDS":   "Records skipped during processing",
-    "REJECTED_RECORDS":  "Records rejected during processing",
-
     # Boolean-like flags — INTEGER 0/1, NOT boolean. Use =1 or =0.
     "IS_FAILED":         "INTEGER 0/1 — use IS_FAILED=1 (never =TRUE or ='FAILED')",
     "IS_STUCK":          "INTEGER 0/1 — use IS_STUCK=1 (never =TRUE)",

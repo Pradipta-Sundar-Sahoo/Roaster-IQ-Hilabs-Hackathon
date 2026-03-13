@@ -55,7 +55,7 @@ TOOL_DECLARATIONS = [
             ),
             genai.protos.FunctionDeclaration(
                 name="run_procedure",
-                description="Run a named diagnostic procedure. Available: triage_stuck_ros (find stuck/failed ROs), record_quality_audit (audit failure rates by state/org), market_health_report (correlate market SCS% with file failures), retry_effectiveness_analysis (compare first-pass vs retry success).",
+                description="Run a named diagnostic procedure. Available: triage_stuck_ros (find stuck/failed ROs), record_quality_audit (audit failure rates by state/org), market_health_report (correlate market SCS% with file failures), retry_effectiveness_analysis (compare first-pass vs retry), generate_pipeline_health_report (comprehensive operational report with summary stats, flagged ROs, bottlenecks, health metrics, market context, retry effectiveness, recommended actions, and charts).",
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
@@ -632,58 +632,193 @@ class SupervisorAgent:
         return f"{state}: {field} changed ({old} → {new})"
 
     async def generate_proactive_alerts(self) -> list:
-        """Generate proactive monitoring alerts by scanning data."""
+        """Generate proactive monitoring alerts with intelligent trend detection."""
         from data_loader import query as db_query
         alerts = []
 
-        # Alert 1: Stuck ROs
+        # ── 1. Stuck ROs ──
         stuck = db_query("SELECT COUNT(*) as c FROM roster WHERE IS_STUCK = 1").iloc[0]["c"]
         if stuck > 0:
             stuck_details = db_query("""
                 SELECT RO_ID, ORG_NM, CNT_STATE,
                        DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days
                 FROM roster WHERE IS_STUCK = 1
+                ORDER BY days DESC LIMIT 20
             """)
             alerts.append({
                 "type": "stuck_ros",
                 "severity": "high",
                 "message": f"{int(stuck)} RO(s) are currently stuck in the pipeline",
+                "recommended_action": "triage_stuck_ros",
+                "recommended_params": {},
                 "details": stuck_details.to_dict(orient="records"),
             })
 
-        # Alert 2: Markets below 95% SCS
+        # ── 2. Markets below 95% SCS ──
         low_markets = db_query("""
             SELECT MARKET, SCS_PERCENT, MONTH
-            FROM metrics
-            WHERE SCS_PERCENT < 95
+            FROM metrics WHERE SCS_PERCENT < 95
             ORDER BY SCS_PERCENT ASC
         """)
         if not low_markets.empty:
+            worst = low_markets.iloc[0]
             alerts.append({
                 "type": "low_scs",
                 "severity": "medium",
-                "message": f"{len(low_markets)} market-month entries below 95% success rate",
-                "details": low_markets.to_dict(orient="records"),
+                "message": f"{len(low_markets)} market-month entries below 95% SCS (worst: {worst['MARKET']} at {worst['SCS_PERCENT']}%)",
+                "recommended_action": "market_health_report",
+                "recommended_params": {"market": str(worst["MARKET"])},
+                "details": low_markets.head(10).to_dict(orient="records"),
             })
 
-        # Alert 3: High failure rate states
+        # ── 3. High failure rate states ──
         high_fail = db_query("""
             SELECT CNT_STATE,
                    ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as fail_rate
-            FROM roster
-            GROUP BY CNT_STATE
-            HAVING fail_rate > 5
-            ORDER BY fail_rate DESC
+            FROM roster GROUP BY CNT_STATE
+            HAVING fail_rate > 5 ORDER BY fail_rate DESC
         """)
         if not high_fail.empty:
+            worst_state = high_fail.iloc[0]
             alerts.append({
                 "type": "high_failure_rate",
                 "severity": "medium",
-                "message": f"{len(high_fail)} states have failure rates above 5%",
+                "message": f"{len(high_fail)} states have failure rates above 5% (worst: {worst_state['CNT_STATE']} at {worst_state['fail_rate']}%)",
+                "recommended_action": "record_quality_audit",
+                "recommended_params": {"state": str(worst_state["CNT_STATE"])},
                 "details": high_fail.to_dict(orient="records"),
             })
 
-        # Alert 4: Compare with last session
+        # ── 4. MoM Market Deterioration ──
+        try:
+            mom_df = db_query("""
+                WITH ranked AS (
+                    SELECT MARKET, MONTH, SCS_PERCENT, MONTH_DATE,
+                           LAG(SCS_PERCENT) OVER (PARTITION BY MARKET ORDER BY MONTH_DATE) as prev_scs
+                    FROM metrics
+                )
+                SELECT MARKET, MONTH, SCS_PERCENT, prev_scs,
+                       ROUND(SCS_PERCENT - prev_scs, 2) as scs_change
+                FROM ranked
+                WHERE prev_scs IS NOT NULL AND (SCS_PERCENT - prev_scs) < -2
+                ORDER BY scs_change ASC
+            """)
+            if not mom_df.empty:
+                details = mom_df.head(10).to_dict(orient="records")
+                worst_drop = mom_df.iloc[0]
+                alerts.append({
+                    "type": "mom_scs_decline",
+                    "severity": "high",
+                    "message": f"{worst_drop['MARKET']} SCS dropped {abs(worst_drop['scs_change'])}% MoM ({worst_drop['prev_scs']}% → {worst_drop['SCS_PERCENT']}%)",
+                    "recommended_action": "market_health_report",
+                    "recommended_params": {"market": str(worst_drop["MARKET"])},
+                    "details": details,
+                })
+        except Exception:
+            pass
+
+        # ── 5. RED Stage Cluster Emergence ──
+        try:
+            stage_red = db_query("""
+                SELECT STAGE_NM, RED_COUNT_TOTAL, TOTAL_ROS,
+                       ROUND(RED_COUNT_TOTAL * 100.0 / NULLIF(TOTAL_ROS, 0), 2) as red_pct
+                FROM stage_health_summary
+                WHERE TOTAL_ROS > 10
+                ORDER BY red_pct DESC
+            """)
+            if not stage_red.empty:
+                avg_red_pct = stage_red["red_pct"].mean()
+                hotspots = stage_red[stage_red["red_pct"] > avg_red_pct * 2]
+                if not hotspots.empty:
+                    alerts.append({
+                        "type": "red_stage_cluster",
+                        "severity": "high",
+                        "message": f"{len(hotspots)} pipeline stage(s) have RED density >2x average ({avg_red_pct:.1f}%): {', '.join(hotspots['STAGE_NM'].tolist())}",
+                        "recommended_action": "triage_stuck_ros",
+                        "recommended_params": {},
+                        "details": hotspots.to_dict(orient="records"),
+                    })
+        except Exception:
+            pass
+
+        # ── 6. Rejection Spikes by Org/Source System ──
+        try:
+            overall_fail_rate = db_query(
+                "SELECT ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as r FROM roster"
+            ).iloc[0]["r"]
+            spike_threshold = float(overall_fail_rate) * 2
+
+            org_spikes = db_query(f"""
+                SELECT SRC_SYS, COUNT(*) as total_ros,
+                       ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as fail_rate
+                FROM roster GROUP BY SRC_SYS
+                HAVING total_ros > 20 AND fail_rate > {spike_threshold}
+                ORDER BY fail_rate DESC
+            """)
+            if not org_spikes.empty:
+                alerts.append({
+                    "type": "source_system_spike",
+                    "severity": "medium",
+                    "message": f"{len(org_spikes)} source system(s) have failure rates >2x average ({overall_fail_rate}%): {', '.join(org_spikes['SRC_SYS'].tolist())}",
+                    "recommended_action": "record_quality_audit",
+                    "recommended_params": {},
+                    "details": org_spikes.to_dict(orient="records"),
+                })
+        except Exception:
+            pass
+
+        # ── 7. Retry Deterioration ──
+        try:
+            retry_df = db_query("""
+                WITH ranked AS (
+                    SELECT MARKET, MONTH, RETRY_LIFT_PCT, MONTH_DATE,
+                           LAG(RETRY_LIFT_PCT) OVER (PARTITION BY MARKET ORDER BY MONTH_DATE) as prev_lift
+                    FROM metrics
+                    WHERE RETRY_LIFT_PCT IS NOT NULL
+                )
+                SELECT MARKET, MONTH, RETRY_LIFT_PCT, prev_lift,
+                       ROUND(RETRY_LIFT_PCT - prev_lift, 2) as lift_change
+                FROM ranked
+                WHERE prev_lift IS NOT NULL AND RETRY_LIFT_PCT < 0
+                ORDER BY RETRY_LIFT_PCT ASC
+            """)
+            if not retry_df.empty:
+                alerts.append({
+                    "type": "retry_deterioration",
+                    "severity": "medium",
+                    "message": f"{len(retry_df)} market-month(s) where retries are making things worse (negative lift)",
+                    "recommended_action": "retry_effectiveness_analysis",
+                    "recommended_params": {},
+                    "details": retry_df.head(10).to_dict(orient="records"),
+                })
+        except Exception:
+            pass
+
+        # ── 8. Repeated Failure Patterns ──
+        try:
+            repeat_df = db_query("""
+                SELECT ORG_NM, LATEST_STAGE_NM, FAILURE_CATEGORY, COUNT(*) as repeat_count
+                FROM roster
+                WHERE IS_FAILED = 1 AND FAILURE_CATEGORY != 'NONE'
+                GROUP BY ORG_NM, LATEST_STAGE_NM, FAILURE_CATEGORY
+                HAVING repeat_count >= 3
+                ORDER BY repeat_count DESC
+                LIMIT 15
+            """)
+            if not repeat_df.empty:
+                top = repeat_df.iloc[0]
+                alerts.append({
+                    "type": "repeated_failure_pattern",
+                    "severity": "medium",
+                    "message": f"{len(repeat_df)} org-stage-category combos have 3+ repeated failures (worst: {top['ORG_NM'][:30]} at {top['LATEST_STAGE_NM']} with {int(top['repeat_count'])}x {top['FAILURE_CATEGORY']})",
+                    "recommended_action": "record_quality_audit",
+                    "recommended_params": {},
+                    "details": repeat_df.to_dict(orient="records"),
+                })
+        except Exception:
+            pass
+
+        # ── 9. Session history ──
         sessions = self.episodic.get_unique_sessions()
         if sessions:
             last_session = sessions[0]
@@ -691,6 +826,8 @@ class SupervisorAgent:
                 "type": "session_history",
                 "severity": "info",
                 "message": f"Last session: {last_session['query_count']} queries at {last_session['last_query']}",
+                "recommended_action": None,
+                "recommended_params": None,
                 "details": last_session,
             })
 

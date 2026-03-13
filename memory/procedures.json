@@ -293,5 +293,75 @@
         "session_id": "c5ea833e-cf63-4f98-acb3-a335524b29b6"
       }
     ]
+  },
+  "generate_pipeline_health_report": {
+    "name": "generate_pipeline_health_report",
+    "version": 1,
+    "description": "Generate a comprehensive operational pipeline health report with summary statistics, flagged ROs, stage bottlenecks, health metrics, market context, retry effectiveness, and recommended actions",
+    "steps": [
+      {
+        "action": "query",
+        "description": "Summary statistics for filtered ROs",
+        "sql": "SELECT COUNT(*) as total_ros, SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END) as failed_ros, SUM(CASE WHEN IS_STUCK=1 THEN 1 ELSE 0 END) as stuck_ros, ROUND(AVG(HEALTH_SCORE),2) as avg_health_score FROM roster WHERE {filter}"
+      },
+      {
+        "action": "query",
+        "description": "Flagged ROs requiring attention",
+        "sql": "SELECT RO_ID, ORG_NM, CNT_STATE, PRIORITY, DAYS_STUCK, RED_COUNT, WORST_HEALTH_STAGE, FAILURE_CATEGORY FROM roster WHERE {filter} AND (PRIORITY IN ('CRITICAL','HIGH') OR IS_STUCK=1 OR IS_FAILED=1) ORDER BY DAYS_STUCK DESC LIMIT 50"
+      },
+      {
+        "action": "query",
+        "description": "Stage bottleneck analysis",
+        "sql": "SELECT LATEST_STAGE_NM as stage, COUNT(*) as total, SUM(CASE WHEN IS_STUCK=1 THEN 1 ELSE 0 END) as stuck, SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END) as failed FROM roster WHERE {filter} GROUP BY LATEST_STAGE_NM ORDER BY stuck DESC"
+      },
+      {
+        "action": "compute",
+        "description": "Derive health metrics per pipeline stage"
+      },
+      {
+        "action": "cross_table",
+        "description": "Market SCS context for relevant states",
+        "sql": "SELECT MARKET, MONTH, SCS_PERCENT, RETRY_LIFT_PCT FROM metrics WHERE MARKET IN ({states}) ORDER BY MARKET, MONTH_DATE DESC"
+      },
+      {
+        "action": "compute",
+        "description": "Calculate retry effectiveness",
+        "logic": "Compare first-run failures vs retry successes within filtered scope"
+      },
+      {
+        "action": "compute",
+        "description": "Generate recommended actions based on thresholds and patterns"
+      },
+      {
+        "action": "visualize",
+        "type": "stage_distribution_and_heatmap",
+        "description": "Stage distribution bar chart + health heatmap"
+      }
+    ],
+    "parameters": {
+      "state": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific state (2-letter code)"
+      },
+      "org": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific organization"
+      },
+      "lob": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific line of business"
+      },
+      "source_system": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific source system"
+      }
+    },
+    "last_modified": "2026-03-13T18:00:00",
+    "modification_history": [],
+    "execution_log": []
   }
 }

@@ -239,8 +239,210 @@ async def dashboard_alerts():
     return {"alerts": alerts}
 
 
+@app.get("/dashboard/intelligence")
+async def dashboard_intelligence():
+    """Decision-support intelligence: summaries, root causes, recommendations."""
+    from data_loader import query as db_query
+
+    # ── Pipeline health summary ──
+    total = db_query("SELECT COUNT(*) as c FROM roster").iloc[0]["c"]
+    stuck = db_query("SELECT COUNT(*) as c FROM roster WHERE IS_STUCK=1").iloc[0]["c"]
+    failed = db_query("SELECT COUNT(*) as c FROM roster WHERE IS_FAILED=1").iloc[0]["c"]
+    critical = db_query("SELECT COUNT(*) as c FROM roster WHERE PRIORITY='CRITICAL'").iloc[0]["c"]
+
+    fail_rate = round(float(failed) / max(float(total), 1) * 100, 2)
+    stuck_rate = round(float(stuck) / max(float(total), 1) * 100, 2)
+
+    health_status = "healthy"
+    if fail_rate > 15 or stuck_rate > 20:
+        health_status = "critical"
+    elif fail_rate > 8 or stuck_rate > 10:
+        health_status = "degraded"
+    elif fail_rate > 3:
+        health_status = "warning"
+
+    pipeline_summary = (
+        f"Pipeline is {health_status.upper()}. "
+        f"{int(total):,} total ROs: {int(failed):,} failed ({fail_rate}%), "
+        f"{int(stuck):,} stuck ({stuck_rate}%), {int(critical):,} critical priority."
+    )
+
+    # ── Root cause insights ──
+    root_causes = []
+
+    top_failures = db_query("""
+        SELECT FAILURE_CATEGORY, FAILURE_STATUS, COUNT(*) as cnt
+        FROM roster WHERE IS_FAILED=1 AND FAILURE_CATEGORY != 'NONE'
+        GROUP BY FAILURE_CATEGORY, FAILURE_STATUS
+        ORDER BY cnt DESC LIMIT 5
+    """)
+    failure_explanations = {
+        "COMPLETE VALIDATION FAILURE": "Schema mismatch or corrupt source data — all records in the file failed validation checks. Likely a source system format change.",
+        "INCOMPATIBLE": "Source system changed its output format without notification. The file structure doesn't match expected schema.",
+        "FAILED": "Generic processing failure — requires investigation of the specific pipeline stage where failure occurred.",
+        "STUCK": "RO has not progressed beyond current stage within expected SLA. May need manual intervention.",
+    }
+    for _, row in top_failures.iterrows():
+        status = str(row.get("FAILURE_STATUS", ""))
+        explanation = failure_explanations.get(status, f"Failure pattern '{status}' detected across multiple ROs.")
+        root_causes.append({
+            "issue": f"{int(row['cnt'])} ROs with {row['FAILURE_CATEGORY']} failure ({status})",
+            "explanation": explanation,
+            "severity": "high" if row["cnt"] > 100 else "medium",
+            "count": int(row["cnt"]),
+        })
+
+    stage_bottleneck = db_query("""
+        SELECT STAGE_NM, STUCK_IN_STAGE, RED_COUNT_TOTAL, TOTAL_ROS,
+               ROUND(RED_COUNT_TOTAL * 100.0 / NULLIF(TOTAL_ROS, 0), 2) as red_pct
+        FROM stage_health_summary
+        WHERE STUCK_IN_STAGE > 0
+        ORDER BY STUCK_IN_STAGE DESC LIMIT 3
+    """)
+    stage_meanings = {
+        "PRE_PROCESSING": "intake/format parsing — RED here means source files have structural issues",
+        "MAPPING_APROVAL": "provider mapping review — RED here means data quality issues requiring manual review",
+        "ISF_GEN": "initial source file generation — RED here means transformation pipeline issues",
+        "DART_GEN": "provider data transformation — RED here means record-level processing failures",
+        "DART_REVIEW": "data review stage — RED here means validation rules are catching errors",
+        "DART_UI_VALIDATION": "UI validation — RED here means human review is finding issues",
+        "SPS_LOAD": "final system-of-record load — RED here means downstream delivery failure",
+    }
+    for _, row in stage_bottleneck.iterrows():
+        stage = str(row["STAGE_NM"])
+        meaning = stage_meanings.get(stage, f"Pipeline stage {stage}")
+        root_causes.append({
+            "issue": f"{int(row['STUCK_IN_STAGE'])} ROs stuck at {stage} ({row['red_pct']}% RED)",
+            "explanation": f"{stage} handles {meaning}. High stuck count suggests systemic issues at this stage.",
+            "severity": "high" if row["STUCK_IN_STAGE"] > 50 else "medium",
+            "count": int(row["STUCK_IN_STAGE"]),
+        })
+
+    # ── Recommended actions ──
+    recommended_actions = []
+
+    if int(critical) > 0:
+        recommended_actions.append({
+            "priority": 1,
+            "action": f"Triage {int(critical)} critical-priority stuck ROs immediately",
+            "procedure": "triage_stuck_ros",
+            "params": {},
+        })
+
+    worst_state = db_query("""
+        SELECT STATE, FAILURE_RATE, FAILED_COUNT
+        FROM state_summary ORDER BY FAILURE_RATE DESC LIMIT 1
+    """)
+    if not worst_state.empty:
+        ws = worst_state.iloc[0]
+        recommended_actions.append({
+            "priority": 2,
+            "action": f"Audit {ws['STATE']} — highest failure rate at {ws['FAILURE_RATE']}% ({int(ws['FAILED_COUNT'])} failures)",
+            "procedure": "record_quality_audit",
+            "params": {"state": str(ws["STATE"])},
+        })
+
+    try:
+        worst_market = db_query("""
+            SELECT MARKET, SCS_PERCENT FROM metrics
+            WHERE MONTH_DATE = (SELECT MAX(MONTH_DATE) FROM metrics)
+            ORDER BY SCS_PERCENT ASC LIMIT 1
+        """)
+        if not worst_market.empty:
+            wm = worst_market.iloc[0]
+            if wm["SCS_PERCENT"] < 95:
+                recommended_actions.append({
+                    "priority": 3,
+                    "action": f"Investigate {wm['MARKET']} market — SCS at {wm['SCS_PERCENT']}% (below 95% SLA)",
+                    "procedure": "market_health_report",
+                    "params": {"market": str(wm["MARKET"])},
+                })
+    except Exception:
+        pass
+
+    recommended_actions.append({
+        "priority": 4,
+        "action": "Analyze retry effectiveness to identify where reprocessing helps vs wastes resources",
+        "procedure": "retry_effectiveness_analysis",
+        "params": {},
+    })
+
+    # ── Retry effectiveness quick stats ──
+    try:
+        retry_stats = db_query("""
+            SELECT
+                COUNT(*) as total_ros_with_retries,
+                SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) as retry_successes,
+                SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) as retry_failures
+            FROM roster WHERE IS_RETRY=1
+        """)
+        rs = retry_stats.iloc[0]
+        retry_total = int(rs["total_ros_with_retries"])
+        retry_eff = {
+            "total_retries": retry_total,
+            "retry_successes": int(rs["retry_successes"]),
+            "retry_failures": int(rs["retry_failures"]),
+            "success_rate": round(float(rs["retry_successes"]) / max(retry_total, 1) * 100, 1),
+        }
+    except Exception:
+        retry_eff = {"total_retries": 0, "success_rate": 0}
+
+    # ── Procedure effectiveness ──
+    proc_effectiveness = {}
+    for name in procedural_memory.get_procedure_names():
+        eff = procedural_memory.get_procedure_effectiveness(name)
+        proc_effectiveness[name] = {
+            "total_runs": eff.get("total_runs", 0),
+            "resolved_rate": eff.get("resolved_rate"),
+            "last_run": eff.get("last_run"),
+        }
+
+    return {
+        "pipeline_health_summary": pipeline_summary,
+        "health_status": health_status,
+        "root_cause_insights": sorted(root_causes, key=lambda x: x["count"], reverse=True),
+        "recommended_actions": sorted(recommended_actions, key=lambda x: x["priority"]),
+        "retry_effectiveness": retry_eff,
+        "procedure_effectiveness": proc_effectiveness,
+    }
+
+
 class ProcedureRequest(BaseModel):
     params: dict = {}
+
+
+class ReportRequest(BaseModel):
+    state: str | None = None
+    org: str | None = None
+    lob: str | None = None
+    source_system: str | None = None
+
+
+@app.post("/report/generate")
+async def generate_report(request: ReportRequest):
+    """Generate a comprehensive pipeline health report."""
+    params = {k: v for k, v in request.model_dump().items() if v is not None}
+    try:
+        procedure = procedural_memory.get_procedure("generate_pipeline_health_report")
+    except KeyError:
+        procedure = {"name": "generate_pipeline_health_report", "version": 1, "steps": [], "parameters": {}}
+
+    from procedures.engine import execute_procedure as run_proc
+    result = run_proc(procedure, params)
+    procedural_memory.log_execution("generate_pipeline_health_report", params, "informational")
+    return result
+
+
+@app.get("/report/latest")
+async def get_latest_report():
+    """Generate a default (unfiltered) pipeline health report for the dashboard."""
+    try:
+        procedure = procedural_memory.get_procedure("generate_pipeline_health_report")
+    except KeyError:
+        procedure = {"name": "generate_pipeline_health_report", "version": 1, "steps": [], "parameters": {}}
+
+    from procedures.engine import execute_procedure as run_proc
+    return run_proc(procedure, {})
 
 
 @app.post("/procedure/{name}")

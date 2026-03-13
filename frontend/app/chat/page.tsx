@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { sendChat, getSessionBriefing, type ChatResponse, type ToolCall } from "@/lib/api";
 import { PlotlyChart } from "@/components/charts/PlotlyChart";
 import { Card } from "@/components/ui/card";
@@ -194,11 +195,13 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
-export default function ChatPage() {
+function ChatPageInner() {
+  const searchParams = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>("");
+  const [prefillHandled, setPrefillHandled] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -214,6 +217,16 @@ export default function ChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (prefillHandled || !sessionId) return;
+    const prefill = searchParams.get("prefill");
+    if (prefill) {
+      setPrefillHandled(true);
+      handleSend(prefill);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, prefillHandled, searchParams]);
 
   const handleSend = async (text?: string) => {
     const query = text || input;
@@ -443,6 +456,14 @@ export default function ChatPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense>
+      <ChatPageInner />
+    </Suspense>
   );
 }
 

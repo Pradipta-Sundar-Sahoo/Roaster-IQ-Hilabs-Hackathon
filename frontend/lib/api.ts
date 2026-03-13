@@ -56,7 +56,42 @@ export interface Alert {
   type: string;
   severity: string;
   message: string;
+  recommended_action?: string | null;
+  recommended_params?: Record<string, unknown> | null;
   details: Record<string, unknown>;
+}
+
+export interface RootCauseInsight {
+  issue: string;
+  explanation: string;
+  severity: string;
+  count: number;
+}
+
+export interface RecommendedAction {
+  priority: number;
+  action: string;
+  procedure: string | null;
+  params: Record<string, unknown>;
+  reason?: string;
+}
+
+export interface IntelligenceData {
+  pipeline_health_summary: string;
+  health_status: string;
+  root_cause_insights: RootCauseInsight[];
+  recommended_actions: RecommendedAction[];
+  retry_effectiveness: {
+    total_retries: number;
+    retry_successes?: number;
+    retry_failures?: number;
+    success_rate: number;
+  };
+  procedure_effectiveness: Record<string, {
+    total_runs: number;
+    resolved_rate: number | null;
+    last_run: string | null;
+  }>;
 }
 
 export async function sendChat(message: string, sessionId?: string): Promise<ChatResponse> {
@@ -99,6 +134,58 @@ export async function getSemanticMemory() {
 export async function getSessionBriefing(sessionId: string): Promise<{ briefing: string; has_briefing: boolean } | null> {
   const result = await fetchWithTimeout(`${API_BASE}/session/briefing?session_id=${encodeURIComponent(sessionId)}`, 4000);
   return result as { briefing: string; has_briefing: boolean } | null;
+}
+
+export async function getIntelligence(): Promise<IntelligenceData | null> {
+  const result = await fetchWithTimeout(`${API_BASE}/dashboard/intelligence`, 10000);
+  return result as IntelligenceData | null;
+}
+
+export interface PipelineReport {
+  procedure: string;
+  filter: string;
+  narrative_summary: string;
+  health_rating: string;
+  summary_statistics: Record<string, number>;
+  flagged_ros: Record<string, unknown>[];
+  flagged_count: number;
+  stage_bottlenecks: {
+    stage: string;
+    total: number;
+    stuck: number;
+    failed: number;
+    avg_red_flags: number;
+    avg_days_stuck: number;
+    interpretation: string;
+  }[];
+  derived_health_metrics: Record<string, number>;
+  failure_breakdown: { category: string; count: number; explanation: string }[];
+  market_context: Record<string, {
+    latest_scs: number;
+    latest_month: string;
+    latest_retry_lift: number | null;
+    trend: Record<string, unknown>[];
+  }>;
+  retry_effectiveness: Record<string, number>;
+  recommended_actions: RecommendedAction[];
+  charts: Record<string, unknown>[];
+  summary: string;
+}
+
+export async function getLatestReport(): Promise<PipelineReport | null> {
+  const result = await fetchWithTimeout(`${API_BASE}/report/latest`, 15000);
+  return result as PipelineReport | null;
+}
+
+export async function generateReport(
+  params: { state?: string; org?: string; lob?: string; source_system?: string } = {}
+): Promise<PipelineReport> {
+  const res = await fetch(`${API_BASE}/report/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  return res.json();
 }
 
 export async function runProcedure(name: string, params: Record<string, unknown> = {}) {
