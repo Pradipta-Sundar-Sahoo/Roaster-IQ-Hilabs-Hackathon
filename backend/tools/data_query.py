@@ -62,34 +62,24 @@ def execute_sql(sql: str) -> dict:
 
 
 def _get_schema_hints(failed_sql: str, error_msg: str) -> dict:
-    """Build schema hints relevant to the failed query to help LLM self-correct."""
-    hints = {}
-    conn = get_connection()
+    """Build schema hints from live schema + fuzzy-match wrong column names."""
+    from schema_provider import (
+        get_schema_for_error_hints, find_column_corrections, get_all_column_names,
+    )
 
-    # Detect which tables the query references
     sql_lower = failed_sql.lower()
-    tables = ["roster", "metrics", "state_summary", "org_summary", "stage_health_summary"]
-    referenced = [t for t in tables if t in sql_lower]
+    all_tables = ["roster", "metrics", "state_summary", "org_summary", "stage_health_summary"]
+    referenced = [t for t in all_tables if t in sql_lower]
     if not referenced:
-        referenced = ["roster", "metrics"]  # default — most queries hit these
+        referenced = ["roster", "metrics"]
 
-    for table in referenced:
-        try:
-            cols_df = conn.execute(f"DESCRIBE {table}").fetchdf()
-            hints[f"{table}_columns"] = [
-                f"{row['column_name']} ({row['column_type']})"
-                for _, row in cols_df.iterrows()
-            ]
-        except Exception:
-            pass
+    # Dynamic schema from DuckDB DESCRIBE
+    hints = get_schema_for_error_hints(referenced)
 
-    # --- Detect known LLM hallucination patterns and give targeted fixes ---
-    corrections = []
+    # Dynamic column corrections via fuzzy matching + pattern checks
+    corrections = find_column_corrections(failed_sql)
 
-    if "status" in sql_lower and "is_failed" not in sql_lower and "is_stuck" not in sql_lower and "failure_status" not in sql_lower:
-        corrections.append(
-            "There is NO 'status' column. Use IS_FAILED=1 for failed ROs, IS_STUCK=1 for stuck ROs."
-        )
+    # Structural checks that depend on table relationships, not column names
     if "top_failure_category" in sql_lower and "org_summary" in sql_lower:
         corrections.append(
             "org_summary does NOT have TOP_FAILURE_CATEGORY. "
@@ -102,48 +92,21 @@ def _get_schema_hints(failed_sql: str, error_msg: str) -> dict:
         corrections.append(
             "org_summary does NOT have TOP_FAILING_ORG. That column only exists in state_summary."
         )
-    if "attempt_number" in sql_lower or "retry_count" in sql_lower or "attempt_count" in sql_lower:
-        corrections.append(
-            "There is NO 'attempt_number' or 'retry_count' column. Use RUN_NO (INTEGER) for the run number."
-        )
-    if "= true" in sql_lower or "= false" in sql_lower or "is true" in sql_lower or "is false" in sql_lower:
-        corrections.append(
-            "IS_FAILED, IS_STUCK, IS_RETRY are INTEGER columns (0 or 1), NOT boolean. "
-            "Use IS_FAILED=1 (not IS_FAILED=TRUE), IS_RETRY=1 (not IS_RETRY=TRUE)."
-        )
-    if "failure_type" in sql_lower or "fail_category" in sql_lower:
-        corrections.append(
-            "The failure grouping column is FAILURE_CATEGORY (not failure_type). "
-            "Values: 'validation', 'timeout', 'processing', 'compliance', 'none', 'other'."
-        )
     if " table " in sql_lower and "create table" not in sql_lower:
         corrections.append(
             "'table' is a reserved keyword in SQL — do not use it as a table alias. "
-            "Remove 'table' keyword: write 'FROM roster r' not 'FROM roster table'."
+            "Use short aliases like 'r' or 'm' instead."
         )
-    # State name checks
-    state_names = {
-        "tennessee": "TN", "new york": "NY", "california": "CA", "texas": "TX",
-        "florida": "FL", "ohio": "OH", "south carolina": "SC", "colorado": "CO",
-        "georgia": "GA", "indiana": "IN", "kentucky": "KY", "virginia": "VA",
-        "washington": "WA", "illinois": "IL", "michigan": "MI",
-    }
-    for name, code in state_names.items():
-        if f"'{name}'" in sql_lower or f'"{name}"' in sql_lower:
-            corrections.append(
-                f"State names are stored as 2-letter codes. Use '{code}' instead of '{name.title()}'."
-            )
 
     if corrections:
         hints["CORRECTIONS_REQUIRED"] = corrections
 
-    # Add common DuckDB gotchas
+    # DuckDB-specific error tips
     error_lower = error_msg.lower()
     if "binder" in error_lower and "column" in error_lower:
         hints["tip"] = (
-            "Column not found in FROM clause. Check the column list above for correct names. "
-            "Key reminders: no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), "
-            "IS_RETRY is INTEGER (use =1 not =TRUE)."
+            "Column not found. Check the column lists above for EXACT names. "
+            "Use column names EXACTLY as listed — do not expand abbreviations."
         )
     elif "subquery" in error_lower and "column" in error_lower:
         hints["tip"] = "Subquery column mismatch. Use JOIN instead of (col1,col2) IN (SELECT ...). DuckDB IN() expects single-column subqueries."
@@ -158,8 +121,6 @@ def _get_schema_hints(failed_sql: str, error_msg: str) -> dict:
             "Other common issues: no LIMIT inside CTEs, use ILIKE for case-insensitive LIKE."
         )
 
-    # Add available tables list
-    hints["available_tables"] = tables
     hints["instruction"] = (
         "Fix ALL issues listed in CORRECTIONS_REQUIRED and tip above, "
         "then call query_data again with the corrected SQL."

@@ -13,7 +13,7 @@ OPENROUTER_TOOLS = [
         "type": "function",
         "function": {
             "name": "query_data",
-            "description": "Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax. CRITICAL: (1) CNT_STATE/MARKET use 2-letter codes (TN, NY, CA), NEVER full names. (2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. (3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO.",
+            "description": "Execute a SQL query (DuckDB). Use EXACT column names from the schema — do NOT expand abbreviations. CRITICAL: CNT_STATE/MARKET=2-letter codes, IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1 not =TRUE), no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), 'table' is reserved.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -152,8 +152,15 @@ class LLMProvider:
         except generation_types.StopCandidateException as e:
             candidate = e.args[0] if e.args else None
             fr = getattr(candidate, "finish_reason", "unknown")
-            print(f"  [Gemini stopped early: finish_reason={fr}]")
-            # Wrap the candidate so the loop can inspect finish_reason and extract any text
+            # Log what was malformed for debugging
+            malformed_info = ""
+            if candidate and hasattr(candidate, "content") and candidate.content:
+                for p in candidate.content.parts:
+                    if p.function_call and p.function_call.name:
+                        malformed_info = f" (tried to call: {p.function_call.name})"
+                    if p.text:
+                        malformed_info += f" (partial text: {p.text[:100]})"
+            print(f"  [Gemini stopped early: finish_reason={fr}{malformed_info}]")
             if candidate is not None:
                 class _FakeResponse:
                     def __init__(self, c):
@@ -186,38 +193,76 @@ class LLMProvider:
         sql_retry_count = 0
         MAX_SQL_RETRIES = 5
 
-        for _ in range(12):  # allow room for retries + self-correction loops
+        malformed_retries = 0
+        MAX_MALFORMED_RETRIES = 3
+
+        for _ in range(15):
             if response is None or not response.candidates:
                 break
 
             candidate = response.candidates[0]
-
-            # finish_reason=12 = MALFORMED_FUNCTION_CALL — Gemini tried to call another tool
-            # but produced a malformed payload. If we already have tool results, send a
-            # plain-text recovery prompt (no tools) to force it to synthesize what it has.
             finish_reason = getattr(candidate, "finish_reason", None)
+
             if finish_reason == 12:
-                print(f"  [Gemini MALFORMED_FUNCTION_CALL — attempting text recovery]")
-                if all_results and not collected_text:
-                    recovery_response = self._safe_send(
-                        chat,
-                        "You have already retrieved the data above. "
-                        "Now provide a detailed text analysis of those results. "
-                        "Do NOT call any more tools.",
-                        generation_config=genai.GenerationConfig(temperature=0.1),
+                malformed_retries += 1
+                print(f"  [Gemini MALFORMED_FUNCTION_CALL — recovery attempt {malformed_retries}/{MAX_MALFORMED_RETRIES}]")
+
+                # Extract what Gemini was trying to do
+                tried_tool = None
+                partial_text_parts = []
+                if candidate.content:
+                    for p in candidate.content.parts:
+                        if p.function_call and p.function_call.name:
+                            tried_tool = p.function_call.name
+                        if p.text and p.text.strip():
+                            partial_text_parts.append(p.text.strip())
+
+                # If there's partial text, capture it
+                if partial_text_parts:
+                    collected_text.extend(partial_text_parts)
+
+                if malformed_retries > MAX_MALFORMED_RETRIES:
+                    if all_results and not collected_text:
+                        recovery_response = self._safe_send(
+                            chat,
+                            "Stop calling tools. Provide a detailed text analysis of ALL "
+                            "the data you have already retrieved. Do NOT call any more tools.",
+                            generation_config=genai.GenerationConfig(temperature=0.1),
+                        )
+                        if recovery_response and recovery_response.candidates:
+                            for p in (recovery_response.candidates[0].content.parts
+                                      if recovery_response.candidates[0].content else []):
+                                if p.text and p.text.strip():
+                                    collected_text.append(p.text.strip())
+                    break
+
+                # Build a context-aware recovery message
+                if tried_tool:
+                    recovery_msg = (
+                        f"Your last function call to '{tried_tool}' was malformed and could not be parsed. "
+                        f"If you still need to call {tried_tool}, format the arguments as valid JSON. "
+                        f"Otherwise, if you have enough data, provide a text analysis instead."
                     )
-                    if recovery_response and recovery_response.candidates:
-                        rc = recovery_response.candidates[0]
-                        rparts = rc.content.parts if rc.content else []
-                        for p in rparts:
-                            if p.text and p.text.strip():
-                                collected_text.append(p.text.strip())
-                break
+                else:
+                    recovery_msg = (
+                        "Your last response was malformed. Either call a tool with properly "
+                        "formatted JSON arguments, or provide a text response."
+                    )
+
+                response = self._safe_send(
+                    chat,
+                    recovery_msg,
+                    tools=tool_declarations,
+                    generation_config=genai.GenerationConfig(temperature=0.1),
+                )
+                continue
+
+            # Successful (non-malformed) response — reset malformed counter
+            malformed_retries = 0
 
             parts = candidate.content.parts if candidate.content else []
             function_calls = [p for p in parts if p.function_call and p.function_call.name]
 
-            # Capture any text from this response (even if it also has function calls)
             for p in parts:
                 if p.text and p.text.strip():
                     collected_text.append(p.text.strip())
@@ -235,7 +280,6 @@ class LLMProvider:
                 tools_used.append(tool_name)
                 result = tool_executor(tool_name, tool_args)
 
-                # Detect SQL errors for self-correction
                 is_sql_error = (
                     tool_name == "query_data"
                     and isinstance(result, dict)
@@ -246,18 +290,17 @@ class LLMProvider:
                 if is_sql_error and sql_retry_count < MAX_SQL_RETRIES:
                     sql_retry_count += 1
                     print(f"  [SQL self-correction attempt {sql_retry_count}/{MAX_SQL_RETRIES}]: {result.get('error', '')[:120]}")
-                    # Build an explicit correction payload — the hints from data_query already
-                    # include the full column list and targeted CORRECTIONS_REQUIRED.
                     correction_payload = {
                         "error": result.get("error", ""),
                         "failed_sql": result.get("failed_sql", ""),
                         "hints": result.get("hints", {}),
                         "action_required": (
                             "The SQL above failed. Study the error, hints, and CORRECTIONS_REQUIRED carefully. "
+                            "Use EXACT column names from the hints schema — do NOT expand abbreviations. "
                             "Rewrite the SQL fixing ALL identified issues and call query_data again. "
                             "Key rules: IS_FAILED=1 (not TRUE), IS_RETRY=1 (not TRUE), RUN_NO (not attempt_number), "
                             "no 'status' column, state codes like TN/NY (not full names), "
-                            "'table' is a reserved keyword (do not use as alias)."
+                            "'table' is a reserved keyword."
                         ),
                     }
                     result_str = json.dumps(correction_payload, default=str)[:5000]
@@ -277,7 +320,11 @@ class LLMProvider:
                     )
                 )
 
-            response = self._safe_send(chat, tool_responses)
+            response = self._safe_send(
+                chat, tool_responses,
+                tools=tool_declarations,
+                generation_config=genai.GenerationConfig(temperature=0.1),
+            )
 
         final_text = "\n\n".join(collected_text)
 

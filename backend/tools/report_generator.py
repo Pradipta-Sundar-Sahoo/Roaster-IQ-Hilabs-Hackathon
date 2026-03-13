@@ -22,13 +22,13 @@ def generate_state_report(state: str) -> dict:
     # Stage bottlenecks (most Red flags)
     bottlenecks = query(f"""
         SELECT
-            SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'Red' THEN 1 ELSE 0 END) as pre_proc_red,
-            SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'Red' THEN 1 ELSE 0 END) as mapping_red,
-            SUM(CASE WHEN ISF_GEN_HEALTH = 'Red' THEN 1 ELSE 0 END) as isf_red,
-            SUM(CASE WHEN DART_GEN_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_gen_red,
-            SUM(CASE WHEN DART_REVIEW_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_review_red,
-            SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_ui_red,
-            SUM(CASE WHEN SPS_LOAD_HEALTH = 'Red' THEN 1 ELSE 0 END) as sps_red
+            SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'RED' THEN 1 ELSE 0 END) as pre_proc_red,
+            SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'RED' THEN 1 ELSE 0 END) as mapping_red,
+            SUM(CASE WHEN ISF_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as isf_red,
+            SUM(CASE WHEN DART_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_gen_red,
+            SUM(CASE WHEN DART_REVIEW_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_review_red,
+            SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_ui_red,
+            SUM(CASE WHEN SPS_LOAD_HEALTH = 'RED' THEN 1 ELSE 0 END) as sps_red
         FROM roster
         WHERE CNT_STATE = '{state}'
     """)

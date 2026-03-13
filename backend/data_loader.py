@@ -23,6 +23,9 @@ def _load_csvs(conn: duckdb.DuckDBPyConnection):
     _preprocess_tables(conn)
     _print_diagnostics(conn)
 
+    from schema_provider import build_schema_cache
+    build_schema_cache(conn)
+
 
 def _load_raw_tables(conn: duckdb.DuckDBPyConnection):
     roster_path = os.path.join(DATA_DIR, "roster_processing_details.csv")
@@ -42,50 +45,95 @@ def _load_raw_tables(conn: duckdb.DuckDBPyConnection):
 
 
 def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
-    # --- roster: enriched with precomputed columns ---
+    # ── Step 1: Standardize raw column names ──
+    _rename_columns = {
+        "AVG_DART_GENERATION_DURATION": "AVG_DART_GEN_DURATION",
+        "AVG_ISF_GENERATION_DURATION": "AVG_ISF_GEN_DURATION",
+        "AVG_DART_UI_VLDTN_DURATION": "AVG_DART_UI_VALIDATION_DURATION",
+    }
+    for old_name, new_name in _rename_columns.items():
+        try:
+            conn.execute(f"ALTER TABLE raw_roster RENAME COLUMN {old_name} TO {new_name}")
+        except Exception:
+            pass
+
+    # ── Step 2: Normalize categorical values in raw_roster ──
+    # Health flags: 'Green'/'Red'/'Yellow' → uppercase
+    health_cols = [
+        "PRE_PROCESSING_HEALTH", "MAPPING_APROVAL_HEALTH", "ISF_GEN_HEALTH",
+        "DART_GEN_HEALTH", "DART_REVIEW_HEALTH", "DART_UI_VALIDATION_HEALTH",
+        "SPS_LOAD_HEALTH",
+    ]
+    for col in health_cols:
+        try:
+            conn.execute(f"UPDATE raw_roster SET {col} = UPPER({col}) WHERE {col} IS NOT NULL")
+        except Exception:
+            pass
+
+    # FAILURE_STATUS: uppercase
+    conn.execute("UPDATE raw_roster SET FAILURE_STATUS = UPPER(TRIM(FAILURE_STATUS)) WHERE FAILURE_STATUS IS NOT NULL")
+
+    # SRC_SYS: uppercase
+    conn.execute("UPDATE raw_roster SET SRC_SYS = UPPER(TRIM(SRC_SYS)) WHERE SRC_SYS IS NOT NULL")
+
+    # FILE_STATUS_CD: cast float → integer
+    try:
+        conn.execute("ALTER TABLE raw_roster ALTER COLUMN FILE_STATUS_CD TYPE INTEGER USING CAST(FILE_STATUS_CD AS INTEGER)")
+    except Exception:
+        pass
+
+    # LATEST_STAGE_NM: standardize full names → abbreviated to match column naming
+    _stage_renames = {
+        "DART_GENERATION": "DART_GEN",
+        "ISF_GENERATION": "ISF_GEN",
+        "MAPPING_APPROVAL": "MAPPING_APROVAL",
+    }
+    for old_val, new_val in _stage_renames.items():
+        conn.execute(f"UPDATE raw_roster SET LATEST_STAGE_NM = '{new_val}' WHERE LATEST_STAGE_NM = '{old_val}'")
+
+    print("[preprocess] Normalized categorical values (UPPER, stage names, FILE_STATUS_CD)")
+
+    # ── Step 3: Build enriched roster table ──
     try:
         conn.execute("""
             CREATE TABLE roster AS
             SELECT *,
-                -- Priority (references DAYS_STUCK and RED_COUNT computed in inner query)
                 CASE
-                    WHEN DAYS_STUCK > 90 AND RED_COUNT >= 2 THEN 'critical'
-                    WHEN DAYS_STUCK > 30 OR  RED_COUNT >= 2 THEN 'high'
-                    WHEN DAYS_STUCK > 7                      THEN 'medium'
-                    ELSE 'low'
+                    WHEN DAYS_STUCK > 90 AND RED_COUNT >= 2 THEN 'CRITICAL'
+                    WHEN DAYS_STUCK > 30 OR  RED_COUNT >= 2 THEN 'HIGH'
+                    WHEN DAYS_STUCK > 7                      THEN 'MEDIUM'
+                    ELSE 'LOW'
                 END AS PRIORITY,
 
                 CAST(RUN_NO > 1 AS INTEGER) AS IS_RETRY,
 
-                TRIM(SPLIT_PART(REPLACE(LOB, '/', ','), ',', 1)) AS LOB_PRIMARY,
+                UPPER(TRIM(SPLIT_PART(REPLACE(LOB, '/', ','), ',', 1))) AS LOB_PRIMARY,
 
                 CASE
-                    WHEN FAILURE_STATUS IS NULL OR TRIM(FAILURE_STATUS) = '' THEN 'none'
-                    WHEN FAILURE_STATUS ILIKE '%valid%'   OR FAILURE_STATUS ILIKE '%reject%'  THEN 'validation'
-                    WHEN FAILURE_STATUS ILIKE '%timeout%' OR FAILURE_STATUS ILIKE '%time%'    THEN 'timeout'
-                    WHEN FAILURE_STATUS ILIKE '%process%' OR FAILURE_STATUS ILIKE '%error%'   THEN 'processing'
-                    WHEN FAILURE_STATUS ILIKE '%compli%'  OR FAILURE_STATUS ILIKE '%cms%'     THEN 'compliance'
-                    ELSE 'other'
+                    WHEN FAILURE_STATUS IS NULL OR TRIM(FAILURE_STATUS) = '' THEN 'NONE'
+                    WHEN FAILURE_STATUS ILIKE '%VALID%'   OR FAILURE_STATUS ILIKE '%REJECT%'  THEN 'VALIDATION'
+                    WHEN FAILURE_STATUS ILIKE '%TIMEOUT%' OR FAILURE_STATUS ILIKE '%TIME%'    THEN 'TIMEOUT'
+                    WHEN FAILURE_STATUS ILIKE '%PROCESS%' OR FAILURE_STATUS ILIKE '%ERROR%'   THEN 'PROCESSING'
+                    WHEN FAILURE_STATUS ILIKE '%COMPLI%'  OR FAILURE_STATUS ILIKE '%CMS%'     THEN 'COMPLIANCE'
+                    ELSE 'OTHER'
                 END AS FAILURE_CATEGORY,
 
-                -- Latest Red stage in pipeline order (last stage wins)
                 CASE
-                    WHEN SPS_LOAD_HEALTH           = 'Red' THEN 'SPS_LOAD'
-                    WHEN DART_UI_VALIDATION_HEALTH  = 'Red' THEN 'DART_UI_VALIDATION'
-                    WHEN DART_REVIEW_HEALTH         = 'Red' THEN 'DART_REVIEW'
-                    WHEN DART_GEN_HEALTH            = 'Red' THEN 'DART_GEN'
-                    WHEN ISF_GEN_HEALTH             = 'Red' THEN 'ISF_GEN'
-                    WHEN MAPPING_APROVAL_HEALTH     = 'Red' THEN 'MAPPING_APPROVAL'
-                    WHEN PRE_PROCESSING_HEALTH      = 'Red' THEN 'PRE_PROCESSING'
+                    WHEN SPS_LOAD_HEALTH           = 'RED' THEN 'SPS_LOAD'
+                    WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 'DART_UI_VALIDATION'
+                    WHEN DART_REVIEW_HEALTH         = 'RED' THEN 'DART_REVIEW'
+                    WHEN DART_GEN_HEALTH            = 'RED' THEN 'DART_GEN'
+                    WHEN ISF_GEN_HEALTH             = 'RED' THEN 'ISF_GEN'
+                    WHEN MAPPING_APROVAL_HEALTH     = 'RED' THEN 'MAPPING_APROVAL'
+                    WHEN PRE_PROCESSING_HEALTH      = 'RED' THEN 'PRE_PROCESSING'
                     ELSE NULL
                 END AS WORST_HEALTH_STAGE,
 
-                -- Numeric stage index for ordering/filtering
                 CASE LATEST_STAGE_NM
                     WHEN 'PRE_PROCESSING'       THEN 0
-                    WHEN 'MAPPING_APPROVAL'     THEN 1
-                    WHEN 'ISF_GENERATION'       THEN 2
-                    WHEN 'DART_GENERATION'      THEN 3
+                    WHEN 'MAPPING_APROVAL'      THEN 1
+                    WHEN 'ISF_GEN'              THEN 2
+                    WHEN 'DART_GEN'             THEN 3
                     WHEN 'DART_REVIEW'          THEN 4
                     WHEN 'DART_UI_VALIDATION'   THEN 5
                     WHEN 'SPS_LOAD'             THEN 6
@@ -100,29 +148,29 @@ def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
                 SELECT *,
                     DATEDIFF('day', FILE_RECEIVED_DT, CURRENT_TIMESTAMP) AS DAYS_STUCK,
 
-                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN ISF_GEN_HEALTH           = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_GEN_HEALTH          = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_REVIEW_HEALTH       = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'Red' THEN 1 ELSE 0 END +
-                     CASE WHEN SPS_LOAD_HEALTH          = 'Red' THEN 1 ELSE 0 END) AS RED_COUNT,
+                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN ISF_GEN_HEALTH           = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_GEN_HEALTH          = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_REVIEW_HEALTH       = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 1 ELSE 0 END +
+                     CASE WHEN SPS_LOAD_HEALTH          = 'RED' THEN 1 ELSE 0 END) AS RED_COUNT,
 
-                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN ISF_GEN_HEALTH           = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_GEN_HEALTH          = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_REVIEW_HEALTH       = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN SPS_LOAD_HEALTH          = 'Yellow' THEN 1 ELSE 0 END) AS YELLOW_COUNT,
+                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN ISF_GEN_HEALTH           = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_GEN_HEALTH          = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_REVIEW_HEALTH       = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN SPS_LOAD_HEALTH          = 'YELLOW' THEN 1 ELSE 0 END) AS YELLOW_COUNT,
 
-                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'Green' THEN 2 WHEN PRE_PROCESSING_HEALTH    = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'Green' THEN 2 WHEN MAPPING_APROVAL_HEALTH   = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN ISF_GEN_HEALTH           = 'Green' THEN 2 WHEN ISF_GEN_HEALTH           = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_GEN_HEALTH          = 'Green' THEN 2 WHEN DART_GEN_HEALTH          = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_REVIEW_HEALTH       = 'Green' THEN 2 WHEN DART_REVIEW_HEALTH       = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'Green' THEN 2 WHEN DART_UI_VALIDATION_HEALTH = 'Yellow' THEN 1 ELSE 0 END +
-                     CASE WHEN SPS_LOAD_HEALTH          = 'Green' THEN 2 WHEN SPS_LOAD_HEALTH          = 'Yellow' THEN 1 ELSE 0 END) AS HEALTH_SCORE
+                    (CASE WHEN PRE_PROCESSING_HEALTH    = 'GREEN' THEN 2 WHEN PRE_PROCESSING_HEALTH    = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN MAPPING_APROVAL_HEALTH   = 'GREEN' THEN 2 WHEN MAPPING_APROVAL_HEALTH   = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN ISF_GEN_HEALTH           = 'GREEN' THEN 2 WHEN ISF_GEN_HEALTH           = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_GEN_HEALTH          = 'GREEN' THEN 2 WHEN DART_GEN_HEALTH          = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_REVIEW_HEALTH       = 'GREEN' THEN 2 WHEN DART_REVIEW_HEALTH       = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN DART_UI_VALIDATION_HEALTH = 'GREEN' THEN 2 WHEN DART_UI_VALIDATION_HEALTH = 'YELLOW' THEN 1 ELSE 0 END +
+                     CASE WHEN SPS_LOAD_HEALTH          = 'GREEN' THEN 2 WHEN SPS_LOAD_HEALTH          = 'YELLOW' THEN 1 ELSE 0 END) AS HEALTH_SCORE
 
                 FROM raw_roster
             ) base
@@ -177,8 +225,8 @@ def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
                 SUM(IS_FAILED)                                                      AS FAILED_COUNT,
                 ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2)                        AS FAILURE_RATE,
                 ROUND(AVG(DAYS_STUCK), 1)                                           AS AVG_DAYS_STUCK,
-                SUM(CASE WHEN PRIORITY = 'critical' THEN 1 ELSE 0 END)             AS CRITICAL_COUNT,
-                SUM(CASE WHEN PRIORITY = 'high'     THEN 1 ELSE 0 END)             AS HIGH_COUNT,
+                SUM(CASE WHEN PRIORITY = 'CRITICAL' THEN 1 ELSE 0 END)             AS CRITICAL_COUNT,
+                SUM(CASE WHEN PRIORITY = 'HIGH'     THEN 1 ELSE 0 END)             AS HIGH_COUNT,
                 ROUND(AVG(RED_COUNT), 3)                                            AS AVG_RED_COUNT,
                 ROUND(AVG(HEALTH_SCORE), 2)                                         AS AVG_HEALTH_SCORE,
                 MODE(FAILURE_CATEGORY)                                              AS TOP_FAILURE_CATEGORY,
@@ -208,7 +256,7 @@ def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
                 ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2)                        AS FAILURE_RATE,
                 ROUND(AVG(RED_COUNT), 3)                                            AS AVG_RED_COUNT,
                 ROUND(AVG(HEALTH_SCORE), 2)                                         AS AVG_HEALTH_SCORE,
-                SUM(CASE WHEN PRIORITY = 'critical' THEN 1 ELSE 0 END)             AS CRITICAL_COUNT
+                SUM(CASE WHEN PRIORITY = 'CRITICAL' THEN 1 ELSE 0 END)             AS CRITICAL_COUNT
             FROM roster
             GROUP BY ORG_NM, CNT_STATE
             ORDER BY TOTAL_ROS DESC

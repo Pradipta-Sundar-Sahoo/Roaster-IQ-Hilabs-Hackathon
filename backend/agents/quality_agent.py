@@ -2,7 +2,7 @@
 
 import os
 import google.generativeai as genai
-from prompts import QUALITY_AGENT_PROMPT
+from prompts import build_quality_prompt
 
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
@@ -12,14 +12,11 @@ QUALITY_TOOL_DECLARATIONS = [
             genai.protos.FunctionDeclaration(
                 name="query_data",
                 description=(
-                    "Execute a SQL query against roster or metrics tables. DuckDB syntax. "
-                    "CRITICAL: (1) CNT_STATE/MARKET use 2-letter codes (TN, NY, CA), NEVER full names. "
-                    "(2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. "
-                    "(3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO. "
-                    "roster: RO_ID, ORG_NM, CNT_STATE, RUN_NO, IS_FAILED, IS_STUCK, FAILURE_STATUS, LATEST_STAGE_NM, "
-                    "FAIL_REC_CNT, REJ_REC_CNT, SCS_PCT; precomputed: FAILURE_CATEGORY, IS_RETRY, RED_COUNT, HEALTH_SCORE, PRIORITY. "
-                    "metrics: MONTH, MARKET, SCS_PERCENT; precomputed: MONTH_DATE, RETRY_LIFT_PCT, IS_BELOW_SLA, OVERALL_FAIL_RATE. "
-                    "Join on roster.CNT_STATE = metrics.MARKET."
+                    "Execute a SQL query (DuckDB). Use EXACT column names from the schema — "
+                    "do NOT expand abbreviations. CRITICAL: CNT_STATE/MARKET=2-letter codes, "
+                    "IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1 not =TRUE), "
+                    "no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), "
+                    "'table' is reserved. Join roster↔metrics on CNT_STATE=MARKET."
                 ),
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
@@ -113,7 +110,7 @@ class QualityAgent:
         from agents.llm_provider import LLMProvider
         llm = LLMProvider()
 
-        system_prompt = QUALITY_AGENT_PROMPT
+        system_prompt = build_quality_prompt()
         if episodic_context:
             system_prompt += f"\n\n{episodic_context}"
 

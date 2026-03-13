@@ -27,7 +27,7 @@ def create_health_heatmap(df: pd.DataFrame) -> dict:
     ]
 
     # Map health flags to numeric: Green=0, Yellow=1, Red=2
-    health_map = {"Green": 0, "Yellow": 1, "Red": 2}
+    health_map = {"GREEN": 0, "YELLOW": 1, "RED": 2}
 
     # Aggregate by org — take the worst health flag
     agg_df = df.groupby("ORG_NM")[health_cols].agg(
@@ -110,8 +110,8 @@ def create_duration_anomaly(df: pd.DataFrame) -> dict:
 
     # Focus on DART generation as it has the most data
     stage_pairs = [
-        ("DART_GEN_DURATION", "AVG_DART_GENERATION_DURATION", "DART Generation"),
-        ("ISF_GEN_DURATION", "AVG_ISF_GENERATION_DURATION", "ISF Generation"),
+        ("DART_GEN_DURATION", "AVG_DART_GEN_DURATION", "DART Generation"),
+        ("ISF_GEN_DURATION", "AVG_ISF_GEN_DURATION", "ISF Generation"),
         ("SPS_LOAD_DURATION", "AVG_SPS_LOAD_DURATION", "SPS Load"),
     ]
 
@@ -258,16 +258,17 @@ def create_stuck_tracker(df: pd.DataFrame) -> dict:
         return None
 
     priority_colors = {
-        "critical": "#e74c3c",
-        "high": "#e67e22",
-        "medium": "#f1c40f",
-        "low": "#2ecc71",
+        "CRITICAL": "#e74c3c",
+        "HIGH": "#e67e22",
+        "MEDIUM": "#f1c40f",
+        "LOW": "#2ecc71",
     }
 
     fig = go.Figure()
 
     for priority, color in priority_colors.items():
-        p_data = df[df["priority"] == priority] if "priority" in df.columns else pd.DataFrame()
+        col = "PRIORITY" if "PRIORITY" in df.columns else "priority"
+        p_data = df[df[col] == priority] if col in df.columns else pd.DataFrame()
         if not p_data.empty:
             fig.add_trace(go.Scatter(
                 x=p_data["ORG_NM"].apply(lambda x: x[:30] + "..." if len(str(x)) > 30 else x),

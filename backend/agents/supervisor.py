@@ -19,7 +19,7 @@ from tools.visualizations import (
     create_retry_lift, create_health_heatmap, create_duration_anomaly,
 )
 from procedures.engine import execute_procedure
-from prompts import SUPERVISOR_SYSTEM_PROMPT, ENTITY_EXTRACTION_PROMPT
+from prompts import SUPERVISOR_SYSTEM_PROMPT, ENTITY_EXTRACTION_PROMPT, build_supervisor_prompt
 from agents.pipeline_agent import PipelineAgent
 from agents.quality_agent import QualityAgent
 
@@ -32,7 +32,7 @@ TOOL_DECLARATIONS = [
         function_declarations=[
             genai.protos.FunctionDeclaration(
                 name="query_data",
-                description="Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax. CRITICAL: (1) CNT_STATE and MARKET use 2-letter state codes (TN, NY, CA), NEVER full names. (2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. (3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO. roster columns: RO_ID, ORG_NM, CNT_STATE, LOB, SRC_SYS, RUN_NO, IS_STUCK, IS_FAILED, FAILURE_STATUS, LATEST_STAGE_NM, *_HEALTH, *_DURATION; precomputed: DAYS_STUCK, RED_COUNT, HEALTH_SCORE, PRIORITY, FAILURE_CATEGORY, IS_RETRY, WORST_HEALTH_STAGE. metrics columns: MONTH, MARKET, SCS_PERCENT; precomputed: MONTH_DATE, RETRY_LIFT_PCT, IS_BELOW_SLA, OVERALL_FAIL_RATE.",
+                description="Execute a SQL query (DuckDB). Use EXACT column names from the schema — do NOT expand abbreviations. CRITICAL: CNT_STATE/MARKET=2-letter codes, IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1 not =TRUE), no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), 'table' is reserved.",
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
@@ -212,12 +212,12 @@ class SupervisorAgent:
                 )
             except Exception as e:
                 print(f"  [supervisor] Pipeline failed ({e}), falling back to direct LLM")
-                system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(episodic_context=episodic_context)
+                system_prompt = build_supervisor_prompt(episodic_context)
                 agent_name = "supervisor"
                 llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
         else:
             agent_name = "supervisor"
-            system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(episodic_context=episodic_context)
+            system_prompt = build_supervisor_prompt(episodic_context)
             llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
 
         tools_used = llm_result.get("tools_used", [])
@@ -455,10 +455,10 @@ class SupervisorAgent:
             elif chart_type == "duration_anomaly":
                 df = db_query("""
                     SELECT ORG_NM, CNT_STATE,
-                           DART_GEN_DURATION, AVG_DART_GENERATION_DURATION,
-                           DART_UI_VALIDATION_DURATION, AVG_DART_UI_VLDTN_DURATION,
+                           DART_GEN_DURATION, AVG_DART_GEN_DURATION,
+                           DART_UI_VALIDATION_DURATION, AVG_DART_UI_VALIDATION_DURATION,
                            SPS_LOAD_DURATION, AVG_SPS_LOAD_DURATION,
-                           ISF_GEN_DURATION, AVG_ISF_GENERATION_DURATION
+                           ISF_GEN_DURATION, AVG_ISF_GEN_DURATION
                     FROM roster
                     WHERE DART_GEN_DURATION IS NOT NULL
                     LIMIT 200
@@ -528,13 +528,13 @@ class SupervisorAgent:
 
             red_df = db_query("""
                 SELECT CNT_STATE,
-                  SUM(CASE WHEN PRE_PROCESSING_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN MAPPING_APROVAL_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN ISF_GEN_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN DART_GEN_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN DART_REVIEW_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN DART_UI_VALIDATION_HEALTH='Red' THEN 1 ELSE 0 END +
-                      CASE WHEN SPS_LOAD_HEALTH='Red' THEN 1 ELSE 0 END) as red_total
+                  SUM(CASE WHEN PRE_PROCESSING_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN MAPPING_APROVAL_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN ISF_GEN_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_GEN_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_REVIEW_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_UI_VALIDATION_HEALTH='RED' THEN 1 ELSE 0 END +
+                      CASE WHEN SPS_LOAD_HEALTH='RED' THEN 1 ELSE 0 END) as red_total
                 FROM roster GROUP BY CNT_STATE
             """)
             for _, r in red_df.iterrows():

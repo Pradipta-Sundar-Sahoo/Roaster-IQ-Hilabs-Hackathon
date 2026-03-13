@@ -1,121 +1,151 @@
-pipeline_stages:
-  - name: INGESTION
-    description: "File received from source system, initial format validation and checksum verification"
-    next_stage: PRE_PROCESSING
-  - name: PRE_PROCESSING
-    description: "Data cleansing, normalization, field mapping preparation. Red health means duration exceeds 2x historical average, often caused by large files or malformed records."
-    health_column: PRE_PROCESSING_HEALTH
-    duration_column: PRE_PROCESSING_DURATION
-    next_stage: MAPPING_APPROVAL
-  - name: MAPPING_APPROVAL
-    description: "Manual or automated approval of field mapping rules between source and target schemas"
-    health_column: MAPPING_APROVAL_HEALTH
-    duration_column: MAPPING_APROVAL_DURATION
-    next_stage: ISF_GENERATION
-  - name: ISF_GENERATION
-    description: "Internal Standard Format generation - transforms provider data to canonical schema for downstream processing"
-    health_column: ISF_GEN_HEALTH
-    duration_column: ISF_GEN_DURATION
-    next_stage: DART_GENERATION
-  - name: DART_GENERATION
-    description: "Data Accuracy Review Tool - generates validation reports checking data against business rules and compliance standards"
-    health_column: DART_GEN_HEALTH
-    duration_column: DART_GEN_DURATION
-    avg_duration_column: AVG_DART_GENERATION_DURATION
-    next_stage: DART_REVIEW
-  - name: DART_REVIEW
-    description: "Review period for DART-generated validation reports before UI validation"
-    health_column: DART_REVIEW_HEALTH
-    duration_column: DART_REVIEW_DURATION
-    next_stage: DART_UI_VALIDATION
-  - name: DART_UI_VALIDATION
-    description: "Human review and validation of DART reports through the UI interface"
-    health_column: DART_UI_VALIDATION_HEALTH
-    duration_column: DART_UI_VALIDATION_DURATION
-    avg_duration_column: AVG_DART_UI_VLDTN_DURATION
-    next_stage: SPS_LOAD
-  - name: SPS_LOAD
-    description: "Final load into Shared Provider Services database - the terminal processing stage"
-    health_column: SPS_LOAD_HEALTH
-    duration_column: SPS_LOAD_DURATION
-    avg_duration_column: AVG_SPS_LOAD_DURATION
-    next_stage: RESOLVED
-
-file_status_codes:
-  9: "STOPPED - Processing halted, may indicate failure or manual hold"
-  45: "DART_REVIEW - File is in DART review stage"
-  49: "DART_GENERATION - File is being processed through DART generation"
-  99: "RESOLVED - Successfully completed all pipeline stages"
-
-latest_stage_values:
-  STOPPED: "Processing has been halted - requires investigation"
-  DART_REVIEW: "Currently in DART review - awaiting validation"
-  DART_GENERATION: "Currently generating DART validation reports"
-  RESOLVED: "Successfully completed all processing stages"
-
-health_flags:
-  Green: "Duration within normal range (< 1.5x historical average). No action needed."
-  Yellow: "Duration elevated (1.5x - 2x historical average). Monitor closely."
-  Red: "Duration critically exceeded (> 2x historical average) or stage failure. Immediate attention required."
-
-health_flag_note: "SPS_LOAD_HEALTH is special - it is derived from record success percentage (SCS_PCT), not from duration."
-
+cross_table_relationships:
+  failure_correlation: High IS_FAILED rates in CSV1 for a state should correlate with
+    lower SCS_PERCENT in CSV2 for the same market
+  retry_linkage: CSV1.RUN_NO > 1 represents retry attempts that connect to CSV2.NEXT_ITER_SCS_CNT
+    (retry success counts)
+  state_to_market: CSV1.CNT_STATE maps directly to CSV2.MARKET for state-level correlation
+  temporal_alignment: CSV1.FILE_RECEIVED_DT month maps to CSV2.MONTH for temporal
+    analysis
+data_notes:
+  missing_columns: The problem statement mentions TOT_REC_CNT, SCS_REC_CNT, FAIL_REC_CNT,
+    SKIP_REC_CNT, REJ_REC_CNT, SCS_PCT but these are not present in the actual CSV.
+    We use IS_FAILED, FAILURE_STATUS, and health flags as quality proxies.
+  proxy_strategy: IS_FAILED (0/1) gives file-level pass/fail. FAILURE_STATUS categorizes
+    failure type. The 7 health columns provide per-stage quality signals.
 failure_statuses:
-  "Complete Validation Failure":
-    meaning: "All records in the file failed validation checks"
-    implication: "Likely schema mismatch, corrupt source data, or non-conformant data format"
+  Complete Validation Failure:
+    implication: Likely schema mismatch, corrupt source data, or non-conformant data
+      format
+    meaning: All records in the file failed validation checks
     severity: critical
-  "Incompatible":
-    meaning: "File format or content incompatible with expected source system schema"
-    implication: "Source system may have changed its output format without notification"
+  Failed:
+    implication: Requires investigation of specific stage where failure occurred
+    meaning: Generic processing failure during pipeline execution
     severity: high
-  "Failed":
-    meaning: "Generic processing failure during pipeline execution"
-    implication: "Requires investigation of specific stage where failure occurred"
+  Incompatible:
+    implication: Source system may have changed its output format without notification
+    meaning: File format or content incompatible with expected source system schema
     severity: high
-  "Stuck":
-    meaning: "RO has not progressed beyond current stage within expected SLA"
-    implication: "May need manual intervention or system issue resolution"
+  Stuck:
+    implication: May need manual intervention or system issue resolution
+    meaning: RO has not progressed beyond current stage within expected SLA
     severity: medium
-
+file_status_codes:
+  9: STOPPED - Processing halted, may indicate failure or manual hold
+  45: DART_REVIEW - File is in DART review stage
+  49: DART_GENERATION - File is being processed through DART generation
+  99: RESOLVED - Successfully completed all pipeline stages
+health_flag_note: SPS_LOAD_HEALTH is special - it is derived from record success percentage
+  (SCS_PCT), not from duration.
+health_flags:
+  Green: Duration within normal range (< 1.5x historical average). No action needed.
+  Red: Duration critically exceeded (> 2x historical average) or stage failure. Immediate
+    attention required.
+  Yellow: Duration elevated (1.5x - 2x historical average). Monitor closely.
+key_metrics:
+  is_failed: Boolean flag - 1 means the RO has encountered a processing failure
+  is_stuck: Boolean flag - 1 means the RO has not progressed past its current stage
+    beyond the expected SLA timeframe
+  run_no: Processing iteration number. 1 = initial run, >1 = reprocessing/retry attempt.
+    Compare RUN_NO=1 vs RUN_NO>1 for retry effectiveness
+  scs_percent: Overall transaction success rate in CSV2 - key market-level health
+    indicator
+latest_stage_values:
+  DART_GENERATION: Currently generating DART validation reports
+  DART_REVIEW: Currently in DART review - awaiting validation
+  RESOLVED: Successfully completed all processing stages
+  STOPPED: Processing has been halted - requires investigation
+lob_meanings:
+  Commercial: Private employer-sponsored or individual market insurance plans
+  Commercial EPO: Exclusive Provider Organization - commercial plan requiring in-network
+    care
+  Commercial HMO: Health Maintenance Organization - commercial managed care plan
+  Commercial PPO: Preferred Provider Organization - commercial plan with network flexibility
+  Medicaid: Federal/state program providing health coverage to eligible low-income
+    adults, children, pregnant women
+  Medicaid FFS: Medicaid Fee-For-Service - traditional pay-per-service Medicaid
+  Medicaid HMO: Managed care Medicaid plans
+  Medicare: Federal health insurance for people 65+, certain younger disabled individuals,
+    and those with End-Stage Renal Disease
+  Medicare HMO: Medicare Advantage HMO plans - managed care Medicare
+modification_history:
+- category: regulatory
+  key: CMS Provider Directory Accuracy 2026
+  new_value: CMS is increasing oversight and enforcement of provider directory accuracy,
+    with a focus on complete, accurate, and timely data across Medicare Fee-for-Service,
+    Medicare Advantage, Medicaid, and CHIP. Health plans are contractually and regulatory
+    accountable for MA directory data.
+  old_value: null
+  reason: CMS ruling found via web search
+  session_id: null
+  timestamp: '2026-03-13T17:37:42.165513'
+pipeline_stages:
+- description: File received from source system, initial format validation and checksum
+    verification
+  name: INGESTION
+  next_stage: PRE_PROCESSING
+- description: Data cleansing, normalization, field mapping preparation. Red health
+    means duration exceeds 2x historical average, often caused by large files or malformed
+    records.
+  duration_column: PRE_PROCESSING_DURATION
+  health_column: PRE_PROCESSING_HEALTH
+  name: PRE_PROCESSING
+  next_stage: MAPPING_APPROVAL
+- description: Manual or automated approval of field mapping rules between source
+    and target schemas
+  duration_column: MAPPING_APROVAL_DURATION
+  health_column: MAPPING_APROVAL_HEALTH
+  name: MAPPING_APPROVAL
+  next_stage: ISF_GENERATION
+- description: Internal Standard Format generation - transforms provider data to canonical
+    schema for downstream processing
+  duration_column: ISF_GEN_DURATION
+  health_column: ISF_GEN_HEALTH
+  name: ISF_GENERATION
+  next_stage: DART_GENERATION
+- avg_duration_column: AVG_DART_GENERATION_DURATION
+  description: Data Accuracy Review Tool - generates validation reports checking data
+    against business rules and compliance standards
+  duration_column: DART_GEN_DURATION
+  health_column: DART_GEN_HEALTH
+  name: DART_GENERATION
+  next_stage: DART_REVIEW
+- description: Review period for DART-generated validation reports before UI validation
+  duration_column: DART_REVIEW_DURATION
+  health_column: DART_REVIEW_HEALTH
+  name: DART_REVIEW
+  next_stage: DART_UI_VALIDATION
+- avg_duration_column: AVG_DART_UI_VLDTN_DURATION
+  description: Human review and validation of DART reports through the UI interface
+  duration_column: DART_UI_VALIDATION_DURATION
+  health_column: DART_UI_VALIDATION_HEALTH
+  name: DART_UI_VALIDATION
+  next_stage: SPS_LOAD
+- avg_duration_column: AVG_SPS_LOAD_DURATION
+  description: Final load into Shared Provider Services database - the terminal processing
+    stage
+  duration_column: SPS_LOAD_DURATION
+  health_column: SPS_LOAD_HEALTH
+  name: SPS_LOAD
+  next_stage: RESOLVED
+regulatory:
+  CMS Provider Directory Accuracy 2026: CMS is increasing oversight and enforcement
+    of provider directory accuracy, with a focus on complete, accurate, and timely
+    data across Medicare Fee-for-Service, Medicare Advantage, Medicaid, and CHIP.
+    Health plans are contractually and regulatory accountable for MA directory data.
 source_systems:
   AvailityPDM:
-    full_name: "Availity Provider Data Management"
-    description: "Primary electronic data interchange platform for provider data. Handles most commercial and Medicare roster submissions."
-  Demographic:
-    description: "Demographic data submission channel for provider demographic information updates."
-  ProviderGroup:
-    description: "Group practice enrollment submissions for provider organizations."
-  PDM:
-    full_name: "Provider Data Management"
-    description: "Direct provider data management submissions."
+    description: Primary electronic data interchange platform for provider data. Handles
+      most commercial and Medicare roster submissions.
+    full_name: Availity Provider Data Management
   DPE:
-    full_name: "Data Processing Engine"
-    description: "Automated data feeds from integrated systems."
-
-lob_meanings:
-  Medicare: "Federal health insurance for people 65+, certain younger disabled individuals, and those with End-Stage Renal Disease"
-  "Medicare HMO": "Medicare Advantage HMO plans - managed care Medicare"
-  Medicaid: "Federal/state program providing health coverage to eligible low-income adults, children, pregnant women"
-  "Medicaid HMO": "Managed care Medicaid plans"
-  "Medicaid FFS": "Medicaid Fee-For-Service - traditional pay-per-service Medicaid"
-  Commercial: "Private employer-sponsored or individual market insurance plans"
-  "Commercial PPO": "Preferred Provider Organization - commercial plan with network flexibility"
-  "Commercial EPO": "Exclusive Provider Organization - commercial plan requiring in-network care"
-  "Commercial HMO": "Health Maintenance Organization - commercial managed care plan"
-
-cross_table_relationships:
-  state_to_market: "CSV1.CNT_STATE maps directly to CSV2.MARKET for state-level correlation"
-  temporal_alignment: "CSV1.FILE_RECEIVED_DT month maps to CSV2.MONTH for temporal analysis"
-  failure_correlation: "High IS_FAILED rates in CSV1 for a state should correlate with lower SCS_PERCENT in CSV2 for the same market"
-  retry_linkage: "CSV1.RUN_NO > 1 represents retry attempts that connect to CSV2.NEXT_ITER_SCS_CNT (retry success counts)"
-
-key_metrics:
-  is_stuck: "Boolean flag - 1 means the RO has not progressed past its current stage beyond the expected SLA timeframe"
-  is_failed: "Boolean flag - 1 means the RO has encountered a processing failure"
-  run_no: "Processing iteration number. 1 = initial run, >1 = reprocessing/retry attempt. Compare RUN_NO=1 vs RUN_NO>1 for retry effectiveness"
-  scs_percent: "Overall transaction success rate in CSV2 - key market-level health indicator"
-
-data_notes:
-  missing_columns: "The problem statement mentions TOT_REC_CNT, SCS_REC_CNT, FAIL_REC_CNT, SKIP_REC_CNT, REJ_REC_CNT, SCS_PCT but these are not present in the actual CSV. We use IS_FAILED, FAILURE_STATUS, and health flags as quality proxies."
-  proxy_strategy: "IS_FAILED (0/1) gives file-level pass/fail. FAILURE_STATUS categorizes failure type. The 7 health columns provide per-stage quality signals."
+    description: Automated data feeds from integrated systems.
+    full_name: Data Processing Engine
+  Demographic:
+    description: Demographic data submission channel for provider demographic information
+      updates.
+  PDM:
+    description: Direct provider data management submissions.
+    full_name: Provider Data Management
+  ProviderGroup:
+    description: Group practice enrollment submissions for provider organizations.

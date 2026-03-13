@@ -210,7 +210,7 @@ async def dashboard_overview():
     ]
     red_counts = {}
     for col in health_cols:
-        cnt = query(f"SELECT COUNT(*) as cnt FROM roster WHERE \"{col}\" = 'Red'").iloc[0]["cnt"]
+        cnt = query(f"SELECT COUNT(*) as cnt FROM roster WHERE \"{col}\" = 'RED'").iloc[0]["cnt"]
         red_counts[col] = int(cnt)
 
     # Market metrics

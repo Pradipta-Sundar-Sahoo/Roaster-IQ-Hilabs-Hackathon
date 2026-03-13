@@ -58,18 +58,17 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
 
     # Step 2: Count Red health flags
     stuck_df["red_count"] = stuck_df[HEALTH_COLUMNS].apply(
-        lambda row: sum(1 for v in row if v == "Red"), axis=1
+        lambda row: sum(1 for v in row if str(v).upper() == "RED"), axis=1
     )
 
-    # Step 3: Classify priority
     def classify(row):
         if row["days_stuck"] > 90 and row["red_count"] >= 2:
-            return "critical"
+            return "CRITICAL"
         elif row["days_stuck"] > 30 or row["red_count"] >= 2:
-            return "high"
+            return "HIGH"
         elif row["days_stuck"] > 7:
-            return "medium"
-        return "low"
+            return "MEDIUM"
+        return "LOW"
 
     stuck_df["priority"] = stuck_df.apply(classify, axis=1)
 
@@ -114,7 +113,7 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
         "failed_summary": failed_summary,
         "market_context": market_context,
         "chart": chart,
-        "summary": f"Found {len(stuck_df)} stuck ROs. {sum(stuck_df['priority'] == 'critical')} critical, {sum(stuck_df['priority'] == 'high')} high priority.",
+        "summary": f"Found {len(stuck_df)} stuck ROs. {sum(stuck_df['priority'] == 'CRITICAL')} critical, {sum(stuck_df['priority'] == 'HIGH')} high priority.",
     }
 
 
@@ -148,13 +147,13 @@ def _execute_quality_audit(procedure: dict, params: dict) -> dict:
     # Step 2: Red health flag counts
     red_df = query(f"""
         SELECT CNT_STATE, ORG_NM,
-               SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'Red' THEN 1 ELSE 0 END) as pre_proc_red,
-               SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'Red' THEN 1 ELSE 0 END) as mapping_red,
-               SUM(CASE WHEN ISF_GEN_HEALTH = 'Red' THEN 1 ELSE 0 END) as isf_red,
-               SUM(CASE WHEN DART_GEN_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_gen_red,
-               SUM(CASE WHEN DART_REVIEW_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_review_red,
-               SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'Red' THEN 1 ELSE 0 END) as dart_ui_red,
-               SUM(CASE WHEN SPS_LOAD_HEALTH = 'Red' THEN 1 ELSE 0 END) as sps_red
+               SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'RED' THEN 1 ELSE 0 END) as pre_proc_red,
+               SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'RED' THEN 1 ELSE 0 END) as mapping_red,
+               SUM(CASE WHEN ISF_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as isf_red,
+               SUM(CASE WHEN DART_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_gen_red,
+               SUM(CASE WHEN DART_REVIEW_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_review_red,
+               SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_ui_red,
+               SUM(CASE WHEN SPS_LOAD_HEALTH = 'RED' THEN 1 ELSE 0 END) as sps_red
         FROM roster
         WHERE {where}
         GROUP BY CNT_STATE, ORG_NM
