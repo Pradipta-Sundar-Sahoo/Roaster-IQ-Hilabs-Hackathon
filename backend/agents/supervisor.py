@@ -22,6 +22,7 @@ from procedures.engine import execute_procedure
 from prompts import SUPERVISOR_SYSTEM_PROMPT, ENTITY_EXTRACTION_PROMPT, build_supervisor_prompt
 from agents.pipeline_agent import PipelineAgent
 from agents.quality_agent import QualityAgent
+from agents.formatter_agent import FormatterAgent
 
 # Configure Gemini
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
@@ -221,9 +222,21 @@ class SupervisorAgent:
             llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
 
         tools_used = llm_result.get("tools_used", [])
+        tool_results = llm_result.get("tool_results", [])
         final_text = llm_result.get("final_text", "")
 
-        for tr in llm_result.get("tool_results", []):
+        # Formatter Agent: after all context/tools, produce clean final output
+        if tool_results and final_text:
+            try:
+                from agents.formatter_agent import FormatterAgent
+                formatter = FormatterAgent()
+                formatted = await formatter.format(user_query, final_text, tool_results)
+                if formatted and len(formatted.strip()) > 50:
+                    final_text = formatted
+            except Exception as e:
+                print(f"  [supervisor] Formatter failed ({e}), using raw response")
+
+        for tr in tool_results:
             result = tr.get("result", {})
             if isinstance(result, dict):
                 if "chart" in result and result["chart"]:

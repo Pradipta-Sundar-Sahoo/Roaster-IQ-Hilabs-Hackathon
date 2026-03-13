@@ -27,8 +27,15 @@ COLUMN_NOTES: dict[str, str] = {
     "CNT_STATE":         "2-letter US state code (e.g. TN, NY, CA). NEVER use full names.",
     "MARKET":            "2-letter US state code, same encoding as CNT_STATE",
     "SRC_SYS":           "Source system, UPPERCASE (e.g. AVAILITYPDM, PROVIDERGROUP, DPE)",
-    "LOB":               "Comma-separated lines of business (raw, prefer LOB_PRIMARY)",
-    "LOB_PRIMARY":       "First LOB extracted from LOB, UPPERCASE",
+    "LOB":               "Raw comma-separated lines of business (use LOB_CATEGORIES or HAS_* flags for queries instead)",
+    "LOB_PRIMARY":       "First LOB extracted from LOB, UPPERCASE (e.g. MEDICARE, MEDICAID, COMMERCIAL)",
+    "LOB_CATEGORIES":    "Sorted, comma-separated normalized LOB categories (e.g. 'COMMERCIAL,MEDICAID,MEDICARE'). Use LOB_CATEGORIES LIKE '%MEDICARE%' or HAS_MEDICARE=1 to filter.",
+    "LOB_COUNT":         "Number of LOBs in the raw LOB field (1 = single-LOB, >1 = multi-LOB)",
+    "HAS_MEDICARE":      "INTEGER 0/1 — 1 if LOB contains any Medicare variant",
+    "HAS_MEDICAID":      "INTEGER 0/1 — 1 if LOB contains any Medicaid variant",
+    "HAS_COMMERCIAL":    "INTEGER 0/1 — 1 if LOB contains any Commercial variant",
+    "LOB_PLAN_TYPE":     "Plan network type: HMO / PPO / EPO / FFS / INDEMNITY / MIXED / UNSPECIFIED. HMO = in-network only (most critical for directory accuracy), FFS = any provider.",
+    "LOB_COMPLIANCE_RISK": "Regulatory risk level: HIGHEST (Medicare HMO), HIGH (Medicare), MEDIUM_HIGH (Medicaid HMO), MEDIUM (Medicaid), LOW (Commercial). Higher risk = stricter CMS/state rules, more rejections expected.",
     "FILE_STATUS_CD":    "Integer status code of the file (e.g. 99=RESOLVED, 65=SPS_LOAD, 9=STOPPED)",
 
     # Pipeline stage

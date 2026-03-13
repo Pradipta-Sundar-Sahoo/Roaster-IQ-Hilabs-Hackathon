@@ -113,7 +113,7 @@ def _get_param(procedure: dict, params: dict, key: str, fallback=None):
 
 def _execute_triage(procedure: dict, params: dict) -> dict:
     """Execute triage_stuck_ros procedure — reads steps from JSON."""
-    state_filter = _get_param(procedure, params, "state_filter")
+    state_filter = _get_param(procedure, params, "state_filter") or params.get("state") or params.get("market")
     include_failed = _get_param(procedure, params, "include_failed", True)
 
     base_sql = _get_step_sql(procedure, "stuck", """
@@ -338,9 +338,9 @@ def _execute_market_report(procedure: dict, params: dict) -> dict:
 
 def _execute_retry_analysis(procedure: dict, params: dict) -> dict:
     """Execute retry_effectiveness_analysis procedure — reads steps from JSON."""
-    state_filter = _get_param(procedure, params, "state_filter")
+    state_filter = _get_param(procedure, params, "state_filter") or params.get("state") or params.get("market")
 
-    where = f"AND r1.CNT_STATE = '{state_filter}'" if state_filter else ""
+    where = f"WHERE r1.CNT_STATE = '{state_filter}'" if state_filter else ""
     retry_sql = _get_step_sql(procedure, "retr", f"""
         WITH first_runs AS (
             SELECT RO_ID, ORG_NM, CNT_STATE, LATEST_STAGE_NM, IS_FAILED, FAILURE_STATUS
@@ -363,9 +363,13 @@ def _execute_retry_analysis(procedure: dict, params: dict) -> dict:
 
     if not retry_df.empty:
         total_retried = len(retry_df)
-        improved = len(retry_df[(retry_df["first_failed"] == 1) & (retry_df["retry_failed"] == 0)])
-        still_failed = len(retry_df[(retry_df["first_failed"] == 1) & (retry_df["retry_failed"] == 1)])
-        resolved_on_retry = len(retry_df[retry_df["retry_stage"] == "RESOLVED"])
+        cols = retry_df.columns.tolist()
+        first_fail_col = "first_failed" if "first_failed" in cols else "IS_FAILED"
+        retry_fail_col = "retry_failed" if "retry_failed" in cols else "IS_FAILED"
+        retry_stage_col = "retry_stage" if "retry_stage" in cols else "LATEST_STAGE_NM"
+        improved = len(retry_df[(retry_df[first_fail_col] == 1) & (retry_df[retry_fail_col] == 0)])
+        still_failed = len(retry_df[(retry_df[first_fail_col] == 1) & (retry_df[retry_fail_col] == 1)])
+        resolved_on_retry = len(retry_df[retry_df[retry_stage_col] == "RESOLVED"])
     else:
         total_retried = improved = still_failed = resolved_on_retry = 0
 

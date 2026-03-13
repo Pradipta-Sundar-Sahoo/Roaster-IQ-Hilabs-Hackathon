@@ -109,6 +109,40 @@ def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
 
                 UPPER(TRIM(SPLIT_PART(REPLACE(LOB, '/', ','), ',', 1))) AS LOB_PRIMARY,
 
+                CAST(LOB ILIKE '%MEDICARE%' AS INTEGER) AS HAS_MEDICARE,
+                CAST(LOB ILIKE '%MEDICAID%' AS INTEGER) AS HAS_MEDICAID,
+                CAST(LOB ILIKE '%COMMERCIAL%' AS INTEGER) AS HAS_COMMERCIAL,
+                ARRAY_TO_STRING(LIST_SORT(LIST_DISTINCT(LIST_TRANSFORM(
+                    STRING_SPLIT(UPPER(REPLACE(LOB, '/', ',')), ','),
+                    x -> CASE
+                        WHEN TRIM(x) LIKE '%MEDICARE%'   THEN 'MEDICARE'
+                        WHEN TRIM(x) LIKE '%MEDICAID%'   THEN 'MEDICAID'
+                        WHEN TRIM(x) LIKE '%COMMERCIAL%' THEN 'COMMERCIAL'
+                        WHEN TRIM(x) LIKE '%INDEMNITY%'  THEN 'INDEMNITY'
+                        WHEN TRIM(x) LIKE '%UNICARE%'    THEN 'UNICARE'
+                        ELSE TRIM(x)
+                    END
+                ))), ',') AS LOB_CATEGORIES,
+                LENGTH(LOB) - LENGTH(REPLACE(LOB, ',', '')) + 1 AS LOB_COUNT,
+
+                CASE
+                    WHEN LOB ILIKE '%HMO%' AND LOB ILIKE '%PPO%' THEN 'MIXED'
+                    WHEN LOB ILIKE '%HMO%'  THEN 'HMO'
+                    WHEN LOB ILIKE '%PPO%'  THEN 'PPO'
+                    WHEN LOB ILIKE '%EPO%'  THEN 'EPO'
+                    WHEN LOB ILIKE '%FFS%'  THEN 'FFS'
+                    WHEN LOB ILIKE '%INDEMNITY%' THEN 'INDEMNITY'
+                    ELSE 'UNSPECIFIED'
+                END AS LOB_PLAN_TYPE,
+
+                CASE
+                    WHEN LOB ILIKE '%MEDICARE%HMO%'  THEN 'HIGHEST'
+                    WHEN LOB ILIKE '%MEDICARE%'       THEN 'HIGH'
+                    WHEN LOB ILIKE '%MEDICAID%HMO%'  THEN 'MEDIUM_HIGH'
+                    WHEN LOB ILIKE '%MEDICAID%'       THEN 'MEDIUM'
+                    ELSE 'LOW'
+                END AS LOB_COMPLIANCE_RISK,
+
                 CASE
                     WHEN FAILURE_STATUS IS NULL OR TRIM(FAILURE_STATUS) = '' THEN 'NONE'
                     WHEN FAILURE_STATUS ILIKE '%VALID%'   OR FAILURE_STATUS ILIKE '%REJECT%'  THEN 'VALIDATION'

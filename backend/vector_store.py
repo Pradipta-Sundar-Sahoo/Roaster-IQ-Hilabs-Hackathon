@@ -16,9 +16,13 @@ class VectorStore:
     # Initialization (idempotent — safe to call on every startup)
     # ------------------------------------------------------------------
 
-    def initialize_domain_knowledge(self, semantic_memory):
+    def initialize_domain_knowledge(self, semantic_memory, force_refresh=False):
         """Load YAML semantic knowledge into ChromaDB. Skips if already populated."""
-        if self.domain_kb.count() > 0:
+        if force_refresh and self.domain_kb.count() > 0:
+            self.client.delete_collection("domain_knowledge")
+            self.domain_kb = self.client.get_or_create_collection("domain_knowledge")
+            print("[vector_store] domain_knowledge force-refreshed")
+        elif self.domain_kb.count() > 0:
             print(f"[vector_store] domain_knowledge already populated ({self.domain_kb.count()} docs)")
             return
 
@@ -47,9 +51,22 @@ class VectorStore:
 
         # LOB meanings
         for key, val in knowledge.get("lob_meanings", {}).items():
-            docs.append(f"Line of Business '{key}': {val}")
+            if isinstance(val, dict):
+                desc = val.get("description", "")
+                risk = val.get("roster_impact", "")
+                strictness = val.get("strictness", "")
+                text = f"Line of Business '{key}': {desc}. Strictness: {strictness}. Roster impact: {risk}"
+            else:
+                text = f"Line of Business '{key}': {val}"
+            docs.append(text)
             ids.append(f"lob_{key}")
             metadatas.append({"category": "lob", "name": key})
+
+        # LOB analysis guidance
+        for key, val in knowledge.get("lob_analysis_guidance", {}).items():
+            docs.append(f"LOB analysis guidance — {key}: {val}")
+            ids.append(f"lob_guide_{key}")
+            metadatas.append({"category": "lob_guidance", "name": key})
 
         # Source systems
         for key, val in knowledge.get("source_systems", {}).items():

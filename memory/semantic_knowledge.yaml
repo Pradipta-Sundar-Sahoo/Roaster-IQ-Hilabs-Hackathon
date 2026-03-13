@@ -7,6 +7,13 @@ cross_table_relationships:
   temporal_alignment: CSV1.FILE_RECEIVED_DT month maps to CSV2.MONTH for temporal
     analysis
 data_notes:
+  federal_vs_state_roster_submission_requirements: Web search for "federal vs state
+    roster submission requirements" did not yield specific regulatory differences
+    for *provider* roster submissions. Results were related to FHA appraisers/inspectors
+    and arbitrators. This suggests that general federal vs. state distinctions for
+    provider rosters might not be easily found through broad searches, or the specific
+    regulations are embedded within LOB-specific (e.g., Medicare vs. Medicaid) guidelines
+    rather than general "roster" rules.
   missing_columns: The problem statement mentions TOT_REC_CNT, SCS_REC_CNT, FAIL_REC_CNT,
     SKIP_REC_CNT, REJ_REC_CNT, SCS_PCT but these are not present in the actual CSV.
     We use IS_FAILED, FAILURE_STATUS, and health flags as quality proxies.
@@ -55,19 +62,96 @@ latest_stage_values:
   DART_REVIEW: Currently in DART review - awaiting validation
   RESOLVED: Successfully completed all processing stages
   STOPPED: Processing has been halted - requires investigation
+lob_analysis_guidance:
+  hmo_vs_ffs: HMO failures are more critical than FFS because HMO patients MUST use
+    in-network providers. A rejected provider record in HMO means patients lose access.
+  rejection_by_lob: High rejections on Medicare HMO but not Commercial PPO suggests
+    a Medicare compliance problem (CMS rule change), not general data quality. High
+    rejections on KS Medicaid but not CA Medicaid suggests a Kansas state rule issue,
+    not an org-wide problem.
+  same_org_different_lob: Same provider org + same state + different LOBs = separate
+    roster files = separate ROs. Each file has different validation rules and can
+    succeed/fail independently.
+  strictness_hierarchy: Medicare HMO > Medicare FFS > Medicaid HMO > Medicaid FFS
+    > Commercial EPO > Commercial HMO > Commercial PPO > Indemnity
 lob_meanings:
-  Commercial: Private employer-sponsored or individual market insurance plans
-  Commercial EPO: Exclusive Provider Organization - commercial plan requiring in-network
-    care
-  Commercial HMO: Health Maintenance Organization - commercial managed care plan
-  Commercial PPO: Preferred Provider Organization - commercial plan with network flexibility
-  Medicaid: Federal/state program providing health coverage to eligible low-income
-    adults, children, pregnant women
-  Medicaid FFS: Medicaid Fee-For-Service - traditional pay-per-service Medicaid
-  Medicaid HMO: Managed care Medicaid plans
-  Medicare: Federal health insurance for people 65+, certain younger disabled individuals,
-    and those with End-Stage Renal Disease
-  Medicare HMO: Medicare Advantage HMO plans - managed care Medicare
+  Commercial:
+    description: Private employer-sponsored or individual market insurance plans
+    regulator: Employer/Payer (least government regulation)
+    roster_impact: Most flexible data formats accepted, least strict compliance requirements
+    strictness: low
+  Commercial EPO:
+    description: Exclusive Provider Organization — in-network only (except emergencies),
+      stricter than PPO
+    regulator: Employer/Payer
+    roster_impact: Similar strictness to HMO but commercial regulation level
+    strictness: low-medium
+  Commercial HMO:
+    description: Health Maintenance Organization — commercial managed care, in-network
+      only
+    regulator: Employer/Payer
+    roster_impact: Similar to Medicare HMO in structure but less regulatory oversight
+    strictness: low-medium
+  Commercial PPO:
+    description: Preferred Provider Organization — in-network cheaper, out-of-network
+      allowed but expensive
+    regulator: Employer/Payer
+    roster_impact: Most common employer insurance plan. Flexible, fewer rejections
+      expected.
+    strictness: low
+  Indemnity:
+    description: Traditional fee-for-service insurance with no network restrictions
+    regulator: Employer/Payer
+    roster_impact: Minimal roster accuracy impact
+    strictness: low
+  Medicaid:
+    description: Federal/state program providing health coverage to eligible low-income
+      adults, children, pregnant women
+    regulator: State government + Federal (jointly funded)
+    roster_impact: Rules are STATE-SPECIFIC. KS Medicaid rules differ from CA Medicaid
+      rules. A roster valid for CA Medicaid may be rejected for KS Medicaid. Each
+      state has its own Medicaid agency.
+    strictness: medium-high
+  Medicaid FFS:
+    description: Medicaid Fee-For-Service — traditional pay-per-service model
+    regulator: State government
+    roster_impact: More flexible than HMO but still subject to state-level validation
+      rules
+    strictness: medium
+  Medicaid HMO:
+    description: Managed care Medicaid — patient must use in-network providers
+    regulator: State government
+    roster_impact: Network accuracy matters. Rejection removes provider from directory,
+      affecting low-income patient access.
+    strictness: medium-high
+  Medicare:
+    description: Federal health insurance for people 65+, certain younger disabled
+      individuals, and those with End-Stage Renal Disease
+    regulator: CMS (Federal)
+    roster_impact: CMS sets strict rules — provider NPI must be valid and active,
+      credentialing requirements very high, rule changes are federal-level affecting
+      all states simultaneously
+    strictness: highest
+  Medicare FFS:
+    description: Medicare Fee-For-Service — patient can see any provider, in-network
+      is cheaper
+    regulator: CMS (Federal)
+    roster_impact: Less critical than HMO for directory accuracy but still important
+      for cost transparency
+    strictness: high
+  Medicare HMO:
+    description: Medicare Advantage HMO — managed care Medicare, patient must use
+      in-network providers only
+    regulator: CMS (Federal)
+    roster_impact: Directory accuracy is CRITICAL. If a provider record is rejected,
+      they disappear from the network directory, patients can't see them as in-network,
+      claims get denied, payer gets fined.
+    strictness: highest
+  UniCare:
+    description: UniCare brand health plans (Anthem subsidiary)
+    regulator: Employer/Payer
+    roster_impact: Commercial-equivalent compliance requirements
+    strictness: low
 modification_history:
 - category: regulatory
   key: CMS Provider Directory Accuracy 2026
@@ -79,6 +163,19 @@ modification_history:
   reason: CMS ruling found via web search
   session_id: null
   timestamp: '2026-03-13T17:37:42.165513'
+- category: data_notes
+  key: federal_vs_state_roster_submission_requirements
+  new_value: Web search for "federal vs state roster submission requirements" did
+    not yield specific regulatory differences for *provider* roster submissions. Results
+    were related to FHA appraisers/inspectors and arbitrators. This suggests that
+    general federal vs. state distinctions for provider rosters might not be easily
+    found through broad searches, or the specific regulations are embedded within
+    LOB-specific (e.g., Medicare vs. Medicaid) guidelines rather than general "roster"
+    rules.
+  old_value: null
+  reason: Web search for regulatory context on NATIONAL market processing patterns.
+  session_id: null
+  timestamp: '2026-03-13T19:05:41.172771'
 pipeline_stages:
 - description: File received from source system, initial format validation and checksum
     verification
