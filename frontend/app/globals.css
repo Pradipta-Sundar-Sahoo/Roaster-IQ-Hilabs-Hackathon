@@ -126,12 +126,16 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    font-family: var(--font-sans);
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
   body {
     @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
-    scroll-behavior: smooth;
+    font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
 
