@@ -1,0 +1,253 @@
+{
+  "triage_stuck_ros": {
+    "name": "triage_stuck_ros",
+    "version": 1,
+    "description": "Find all stuck and failed ROs, rank by time stuck and Red health flags, recommend escalation priority",
+    "steps": [
+      {
+        "action": "query",
+        "description": "Find all stuck ROs",
+        "sql": "SELECT *, DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days_stuck FROM roster WHERE IS_STUCK = 1 ORDER BY days_stuck DESC"
+      },
+      {
+        "action": "compute",
+        "description": "Count Red health flags per RO",
+        "field": "red_count",
+        "health_columns": [
+          "PRE_PROCESSING_HEALTH",
+          "MAPPING_APROVAL_HEALTH",
+          "ISF_GEN_HEALTH",
+          "DART_GEN_HEALTH",
+          "DART_REVIEW_HEALTH",
+          "DART_UI_VALIDATION_HEALTH",
+          "SPS_LOAD_HEALTH"
+        ]
+      },
+      {
+        "action": "classify",
+        "description": "Assign priority based on days stuck and Red flags",
+        "rules": {
+          "critical": "days_stuck > 90 AND red_count >= 2",
+          "high": "days_stuck > 30 OR red_count >= 2",
+          "medium": "days_stuck > 7",
+          "low": "otherwise"
+        }
+      },
+      {
+        "action": "cross_table",
+        "description": "For each stuck RO's state, fetch market SCS_PERCENT from metrics table",
+        "sql": "SELECT MARKET, SCS_PERCENT, MONTH FROM metrics WHERE MARKET IN ({states}) ORDER BY MONTH DESC"
+      },
+      {
+        "action": "visualize",
+        "type": "stuck_ro_tracker",
+        "description": "Generate stuck RO tracker visualization"
+      }
+    ],
+    "parameters": {
+      "include_failed": {
+        "type": "boolean",
+        "default": true,
+        "description": "Also include IS_FAILED=1 ROs"
+      },
+      "state_filter": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific state"
+      }
+    },
+    "last_modified": "2026-03-13T10:00:00",
+    "modification_history": []
+  },
+  "record_quality_audit": {
+    "name": "record_quality_audit",
+    "version": 6,
+    "description": "For a given state or org, compute failure rates, health flag distribution, and flag files below quality threshold",
+    "steps": [
+      {
+        "action": "query",
+        "description": "Get failure stats by state/org",
+        "sql": "SELECT CNT_STATE, ORG_NM, COUNT(*) as total_files, SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failed_files, ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate FROM roster WHERE {filter} GROUP BY CNT_STATE, ORG_NM ORDER BY failure_rate DESC"
+      },
+      {
+        "action": "compute",
+        "description": "Compute Red health flag counts per org",
+        "health_columns": [
+          "PRE_PROCESSING_HEALTH",
+          "MAPPING_APROVAL_HEALTH",
+          "ISF_GEN_HEALTH",
+          "DART_GEN_HEALTH",
+          "DART_REVIEW_HEALTH",
+          "DART_UI_VALIDATION_HEALTH",
+          "SPS_LOAD_HEALTH"
+        ]
+      },
+      {
+        "action": "classify",
+        "description": "Categorize by FAILURE_STATUS",
+        "sql": "SELECT FAILURE_STATUS, COUNT(*) as cnt FROM roster WHERE IS_FAILED = 1 AND {filter} GROUP BY FAILURE_STATUS ORDER BY cnt DESC"
+      },
+      {
+        "action": "threshold_check",
+        "description": "Flag orgs with failure rate above threshold",
+        "default_threshold": 5.0
+      },
+      {
+        "action": "visualize",
+        "type": "failure_breakdown",
+        "description": "Stacked bar chart of failure types per state/org"
+      }
+    ],
+    "parameters": {
+      "state": {
+        "type": "string",
+        "default": null,
+        "description": "State to audit"
+      },
+      "org": {
+        "type": "string",
+        "default": null,
+        "description": "Organization to audit"
+      },
+      "threshold": {
+        "type": "number",
+        "default": 5.0,
+        "description": "Failure rate threshold (%)"
+      }
+    },
+    "last_modified": "2026-03-13T06:57:54.852180",
+    "modification_history": [
+      {
+        "timestamp": "2026-03-13T06:48:25.849636",
+        "from_version": 1,
+        "to_version": 2,
+        "changes": {
+          "summary": "Include SKIP_REC_CNT in the quality calculation."
+        }
+      },
+      {
+        "timestamp": "2026-03-13T06:50:41.337398",
+        "from_version": 2,
+        "to_version": 3,
+        "changes": {
+          "summary": "Include SKIP_REC_CNT in the quality calculation."
+        }
+      },
+      {
+        "timestamp": "2026-03-13T06:53:14.604296",
+        "from_version": 3,
+        "to_version": 4,
+        "changes": {
+          "summary": "Include SKIP_REC_CNT in the quality calculation"
+        }
+      },
+      {
+        "timestamp": "2026-03-13T06:56:03.445437",
+        "from_version": 4,
+        "to_version": 5,
+        "changes": {
+          "summary": "Include SKIP_REC_CNT in the quality calculation."
+        }
+      },
+      {
+        "timestamp": "2026-03-13T06:57:54.852161",
+        "from_version": 5,
+        "to_version": 6,
+        "changes": {
+          "summary": "Include SKIP_REC_CNT in the quality calculation."
+        }
+      }
+    ]
+  },
+  "market_health_report": {
+    "name": "market_health_report",
+    "version": 1,
+    "description": "Correlate a market's SCS_PERCENT (CSV2) with pipeline-level file failure rates (CSV1) for the same state",
+    "steps": [
+      {
+        "action": "query",
+        "description": "Get market SCS_PERCENT trend",
+        "sql": "SELECT MONTH, MARKET, SCS_PERCENT, FIRST_ITER_SCS_CNT, FIRST_ITER_FAIL_CNT, NEXT_ITER_SCS_CNT, OVERALL_SCS_CNT, OVERALL_FAIL_CNT FROM metrics WHERE MARKET = '{market}' ORDER BY MONTH"
+      },
+      {
+        "action": "query",
+        "description": "Get file-level metrics for same state",
+        "sql": "SELECT STRFTIME(CAST(FILE_RECEIVED_DT AS TIMESTAMP), '%m-%Y') as month, COUNT(*) as total_files, SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failed_files, ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as file_failure_rate FROM roster WHERE CNT_STATE = '{state}' GROUP BY month ORDER BY month"
+      },
+      {
+        "action": "correlate",
+        "description": "Compare market SCS_PERCENT with file failure rates to identify correlated declines"
+      },
+      {
+        "action": "cross_table",
+        "description": "Identify top failing orgs in this state from CSV1",
+        "sql": "SELECT ORG_NM, COUNT(*) as files, SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failures FROM roster WHERE CNT_STATE = '{state}' GROUP BY ORG_NM ORDER BY failures DESC LIMIT 10"
+      },
+      {
+        "action": "visualize",
+        "type": "market_trend",
+        "description": "Dual-axis chart: SCS_PERCENT trend + file failure rate"
+      }
+    ],
+    "parameters": {
+      "market": {
+        "type": "string",
+        "required": true,
+        "description": "Market/state code (e.g., NY, CA, TN)"
+      },
+      "months": {
+        "type": "integer",
+        "default": 6,
+        "description": "Number of months to analyze"
+      }
+    },
+    "last_modified": "2026-03-13T10:00:00",
+    "modification_history": []
+  },
+  "retry_effectiveness_analysis": {
+    "name": "retry_effectiveness_analysis",
+    "version": 1,
+    "description": "Compare first-pass vs retry success rates to determine if reprocessing improves outcomes",
+    "steps": [
+      {
+        "action": "query",
+        "description": "Find ROs with retries (RUN_NO > 1)",
+        "sql": "SELECT RO_ID, RUN_NO, LATEST_STAGE_NM, IS_FAILED, IS_STUCK, FAILURE_STATUS, FILE_RECEIVED_DT FROM roster WHERE RO_ID IN (SELECT DISTINCT RO_ID FROM roster WHERE RUN_NO > 1) ORDER BY RO_ID, RUN_NO"
+      },
+      {
+        "action": "compute",
+        "description": "Compare first run vs latest retry outcome per RO",
+        "logic": "For each RO: compare RUN_NO=1 (IS_FAILED, LATEST_STAGE_NM) vs max(RUN_NO) result"
+      },
+      {
+        "action": "query",
+        "description": "Market-level retry lift from CSV2",
+        "sql": "SELECT MARKET, MONTH, FIRST_ITER_SCS_CNT, NEXT_ITER_SCS_CNT, OVERALL_SCS_CNT, ROUND((NEXT_ITER_SCS_CNT - FIRST_ITER_SCS_CNT) * 100.0 / NULLIF(FIRST_ITER_SCS_CNT, 0), 2) as retry_lift_pct FROM metrics ORDER BY MARKET, MONTH"
+      },
+      {
+        "action": "classify",
+        "description": "Identify ROs that never improved despite retries",
+        "logic": "ROs where max(RUN_NO) > 1 AND still IS_FAILED=1"
+      },
+      {
+        "action": "visualize",
+        "type": "retry_lift",
+        "description": "Grouped bar chart: first-iter vs overall success by market"
+      }
+    ],
+    "parameters": {
+      "state_filter": {
+        "type": "string",
+        "default": null,
+        "description": "Filter to specific state"
+      },
+      "min_retries": {
+        "type": "integer",
+        "default": 1,
+        "description": "Minimum retry count to include"
+      }
+    },
+    "last_modified": "2026-03-13T10:00:00",
+    "modification_history": []
+  }
+}

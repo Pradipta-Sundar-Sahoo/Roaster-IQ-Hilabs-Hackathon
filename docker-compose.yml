@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: rosteriq_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./memory:/app/memory
+    env_file:
+      - .env
+    environment:
+      - DATA_PATH=/app/data
+      - MEMORY_PATH=/app/memory
+    networks:
+      - rosteriq
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: rosteriq_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - rosteriq
+
+networks:
+  rosteriq:
+    driver: bridge
