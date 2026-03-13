@@ -1,6 +1,7 @@
 """Semantic Memory — YAML-loaded domain knowledge about the roster pipeline."""
 
 import os
+from datetime import datetime
 import yaml
 
 
@@ -12,11 +13,61 @@ class SemanticMemory:
     def _load(self) -> dict:
         if os.path.exists(self.yaml_path):
             with open(self.yaml_path, "r") as f:
-                return yaml.safe_load(f)
+                return yaml.safe_load(f) or {}
         return {}
+
+    def _save(self) -> None:
+        with open(self.yaml_path, "w") as f:
+            yaml.dump(self.knowledge, f, default_flow_style=False, allow_unicode=True)
 
     def get_all_knowledge(self) -> dict:
         return self.knowledge
+
+    def update_knowledge(
+        self,
+        category: str,
+        key: str,
+        value: str,
+        reason: str,
+        session_id: str | None = None,
+    ) -> dict:
+        """Add or update a knowledge entry at runtime. Persists to YAML.
+        Handles both dict-type (lob_meanings, failure_statuses) and list-type
+        (pipeline_stages) categories."""
+        if category not in self.knowledge:
+            self.knowledge[category] = {}
+
+        old_value = None
+        target = self.knowledge[category]
+
+        if isinstance(target, dict):
+            old_value = target.get(key)
+            target[key] = value
+        elif isinstance(target, list):
+            # List of dicts (e.g. pipeline_stages) — update by name or append
+            existing = next((item for item in target if isinstance(item, dict) and item.get("name") == key), None)
+            if existing:
+                old_value = existing.get("description", "")
+                existing["description"] = value
+            else:
+                target.append({"name": key, "description": value})
+
+        # Track modification history
+        if "modification_history" not in self.knowledge:
+            self.knowledge["modification_history"] = []
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "category": category,
+            "key": key,
+            "old_value": str(old_value) if old_value is not None else None,
+            "new_value": str(value),
+            "reason": reason,
+            "session_id": session_id,
+        }
+        self.knowledge["modification_history"].append(record)
+        self._save()
+
+        return {"updated": True, "category": category, "key": key, "change": record}
 
     def get_stage_info(self, stage_name: str) -> dict | None:
         for stage in self.knowledge.get("pipeline_stages", []):

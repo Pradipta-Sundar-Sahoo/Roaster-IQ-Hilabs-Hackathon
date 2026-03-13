@@ -1,4 +1,4 @@
-"""LLM Provider — supports Gemini (primary) and OpenRouter (fallback)."""
+"""LLM Provider — Gemini. OpenRouter methods retained for reference but not active."""
 
 import json
 import os
@@ -13,7 +13,7 @@ OPENROUTER_TOOLS = [
         "type": "function",
         "function": {
             "name": "query_data",
-            "description": "Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax.",
+            "description": "Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax. CRITICAL: (1) CNT_STATE/MARKET use 2-letter codes (TN, NY, CA), NEVER full names. (2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. (3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -98,45 +98,46 @@ OPENROUTER_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_semantic_knowledge",
+            "description": "Update the domain knowledge base when web search reveals new regulatory information, new LOB types, or failure patterns. Call after web_search returns regulatory updates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Knowledge category: lob_meanings, failure_statuses, source_systems, pipeline_stages, data_notes"},
+                    "key": {"type": "string", "description": "The specific key or name to add/update"},
+                    "value": {"type": "string", "description": "The value or description to store"},
+                    "reason": {"type": "string", "description": "Why this knowledge is being added"},
+                },
+                "required": ["category", "key", "value", "reason"],
+            },
+        },
+    },
 ]
 
 
 class LLMProvider:
-    """Manages LLM calls with Gemini primary and OpenRouter fallback."""
+    """Manages LLM calls via Gemini."""
 
     def __init__(self):
-        self.provider = os.environ.get("LLM_PROVIDER", "gemini")
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash-exp:free")
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
-        if self.provider == "gemini":
-            genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
-
-    async def chat_with_tools(self, system_prompt: str, user_query: str, tool_executor) -> dict:
+    async def chat_with_tools(
+        self, system_prompt: str, user_query: str, tool_executor, tool_declarations=None
+    ) -> dict:
         """Run a chat with tool calls. Returns dict with final_text, tools_used, tool_results."""
-        try:
-            if self.provider == "gemini":
-                return await self._gemini_chat(system_prompt, user_query, tool_executor)
-            else:
-                return await self._openrouter_chat(system_prompt, user_query, tool_executor)
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "quota" in error_str.lower():
-                print(f"Gemini quota exceeded, falling back to OpenRouter...")
-                if self.openrouter_key:
-                    self.provider = "openrouter"
-                    return await self._openrouter_chat(system_prompt, user_query, tool_executor)
-            raise
+        return await self._gemini_chat(system_prompt, user_query, tool_executor, tool_declarations)
 
     async def extract_entities(self, prompt: str) -> dict:
-        """Extract entities using LLM."""
+        """Extract entities using Gemini."""
         try:
-            if self.provider == "gemini":
-                model = genai.GenerativeModel("gemini-2.5-flash")
-                response = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=0))
-                text = response.text.strip()
-            else:
-                text = await self._openrouter_simple(prompt)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=0))
+            text = response.text.strip()
 
             text = re.sub(r"```json\s*", "", text)
             text = re.sub(r"```\s*", "", text)
@@ -149,15 +150,25 @@ class LLMProvider:
         try:
             return chat.send_message(content, **kwargs)
         except generation_types.StopCandidateException as e:
-            print(f"  [Gemini stopped early: finish_reason={e.args[0].finish_reason}]")
+            candidate = e.args[0] if e.args else None
+            fr = getattr(candidate, "finish_reason", "unknown")
+            print(f"  [Gemini stopped early: finish_reason={fr}]")
+            # Wrap the candidate so the loop can inspect finish_reason and extract any text
+            if candidate is not None:
+                class _FakeResponse:
+                    def __init__(self, c):
+                        self.candidates = [c]
+                return _FakeResponse(candidate)
             return None
         except Exception as e:
             print(f"  [Gemini error: {e}]")
             return None
 
-    async def _gemini_chat(self, system_prompt: str, user_query: str, tool_executor) -> dict:
-        """Gemini function-calling chat loop with error handling."""
-        from agents.supervisor import TOOL_DECLARATIONS
+    async def _gemini_chat(self, system_prompt: str, user_query: str, tool_executor, tool_declarations=None) -> dict:
+        """Gemini function-calling chat loop with SQL self-correction."""
+        if tool_declarations is None:
+            from agents.supervisor import TOOL_DECLARATIONS
+            tool_declarations = TOOL_DECLARATIONS
 
         model = genai.GenerativeModel("gemini-2.5-flash")
         chat = model.start_chat()
@@ -165,20 +176,51 @@ class LLMProvider:
         response = self._safe_send(
             chat,
             [system_prompt, f"\nUser query: {user_query}"],
-            tools=TOOL_DECLARATIONS,
+            tools=tool_declarations,
             generation_config=genai.GenerationConfig(temperature=0.1),
         )
 
         tools_used = []
         all_results = []
+        collected_text = []  # Capture text from ALL responses, not just the last
+        sql_retry_count = 0
+        MAX_SQL_RETRIES = 5
 
-        for _ in range(6):
+        for _ in range(12):  # allow room for retries + self-correction loops
             if response is None or not response.candidates:
                 break
 
             candidate = response.candidates[0]
-            parts = candidate.content.parts
+
+            # finish_reason=12 = MALFORMED_FUNCTION_CALL — Gemini tried to call another tool
+            # but produced a malformed payload. If we already have tool results, send a
+            # plain-text recovery prompt (no tools) to force it to synthesize what it has.
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason == 12:
+                print(f"  [Gemini MALFORMED_FUNCTION_CALL — attempting text recovery]")
+                if all_results and not collected_text:
+                    recovery_response = self._safe_send(
+                        chat,
+                        "You have already retrieved the data above. "
+                        "Now provide a detailed text analysis of those results. "
+                        "Do NOT call any more tools.",
+                        generation_config=genai.GenerationConfig(temperature=0.1),
+                    )
+                    if recovery_response and recovery_response.candidates:
+                        rc = recovery_response.candidates[0]
+                        rparts = rc.content.parts if rc.content else []
+                        for p in rparts:
+                            if p.text and p.text.strip():
+                                collected_text.append(p.text.strip())
+                break
+
+            parts = candidate.content.parts if candidate.content else []
             function_calls = [p for p in parts if p.function_call and p.function_call.name]
+
+            # Capture any text from this response (even if it also has function calls)
+            for p in parts:
+                if p.text and p.text.strip():
+                    collected_text.append(p.text.strip())
 
             if not function_calls:
                 break
@@ -192,13 +234,40 @@ class LLMProvider:
                 print(f"  Tool: {tool_name}({json.dumps(tool_args, default=str)[:120]})")
                 tools_used.append(tool_name)
                 result = tool_executor(tool_name, tool_args)
-                all_results.append({"tool": tool_name, "args": tool_args, "result": result})
 
-                if isinstance(result, dict) and "data" in result and isinstance(result["data"], list):
-                    compact = {"row_count": result.get("row_count", 0), "columns": result.get("columns", []), "sample": result["data"][:10]}
-                    result_str = json.dumps(compact, default=str)[:3000]
+                # Detect SQL errors for self-correction
+                is_sql_error = (
+                    tool_name == "query_data"
+                    and isinstance(result, dict)
+                    and "error" in result
+                    and result["error"].startswith("SQL_ERROR:")
+                )
+
+                if is_sql_error and sql_retry_count < MAX_SQL_RETRIES:
+                    sql_retry_count += 1
+                    print(f"  [SQL self-correction attempt {sql_retry_count}/{MAX_SQL_RETRIES}]: {result.get('error', '')[:120]}")
+                    # Build an explicit correction payload — the hints from data_query already
+                    # include the full column list and targeted CORRECTIONS_REQUIRED.
+                    correction_payload = {
+                        "error": result.get("error", ""),
+                        "failed_sql": result.get("failed_sql", ""),
+                        "hints": result.get("hints", {}),
+                        "action_required": (
+                            "The SQL above failed. Study the error, hints, and CORRECTIONS_REQUIRED carefully. "
+                            "Rewrite the SQL fixing ALL identified issues and call query_data again. "
+                            "Key rules: IS_FAILED=1 (not TRUE), IS_RETRY=1 (not TRUE), RUN_NO (not attempt_number), "
+                            "no 'status' column, state codes like TN/NY (not full names), "
+                            "'table' is a reserved keyword (do not use as alias)."
+                        ),
+                    }
+                    result_str = json.dumps(correction_payload, default=str)[:5000]
                 else:
-                    result_str = json.dumps(result, default=str)[:3000]
+                    all_results.append({"tool": tool_name, "args": tool_args, "result": result})
+                    if isinstance(result, dict) and "data" in result and isinstance(result["data"], list):
+                        compact = {"row_count": result.get("row_count", 0), "columns": result.get("columns", []), "sample": result["data"][:10]}
+                        result_str = json.dumps(compact, default=str)[:3000]
+                    else:
+                        result_str = json.dumps(result, default=str)[:3000]
 
                 tool_responses.append(
                     genai.protos.Part(
@@ -210,23 +279,59 @@ class LLMProvider:
 
             response = self._safe_send(chat, tool_responses)
 
-        final_text = ""
-        if response and response.candidates:
-            for part in response.candidates[0].content.parts:
-                if part.text:
-                    final_text += part.text
+        final_text = "\n\n".join(collected_text)
 
+        # Fallback: build a readable summary from tool results
         if not final_text and all_results:
-            summaries = []
-            for r in all_results:
-                res = r["result"]
-                if isinstance(res, dict) and "summary" in res:
-                    summaries.append(res["summary"])
-                elif isinstance(res, dict) and "data" in res:
-                    summaries.append(f"{r['tool']}: {res.get('row_count', '?')} rows returned")
-            final_text = "Here are the results from my analysis:\n\n" + "\n".join(summaries) if summaries else "Analysis complete. See charts and data below."
+            final_text = self._build_fallback_summary(all_results)
 
         return {"final_text": final_text, "tools_used": tools_used, "tool_results": all_results}
+
+    @staticmethod
+    def _build_fallback_summary(all_results: list) -> str:
+        """Build a markdown summary from tool results when LLM doesn't generate text."""
+        sections = []
+        for r in all_results:
+            res = r["result"]
+            if not isinstance(res, dict):
+                continue
+
+            # Procedure results with summary
+            if "summary" in res:
+                sections.append(res["summary"])
+
+            # Data results — render as markdown table
+            if "data" in res and isinstance(res["data"], list) and res["data"]:
+                rows = res["data"]
+                cols = res.get("columns", list(rows[0].keys()))
+                row_count = res.get("row_count", len(rows))
+
+                # Build markdown table
+                header = "| " + " | ".join(str(c) for c in cols) + " |"
+                separator = "| " + " | ".join("---" for _ in cols) + " |"
+                table_rows = []
+                for row in rows[:20]:  # cap at 20 for readability
+                    cells = []
+                    for c in cols:
+                        val = row.get(c)
+                        if val is None:
+                            cells.append("—")
+                        elif isinstance(val, float):
+                            cells.append(f"{val:.2f}")
+                        else:
+                            cells.append(str(val))
+                    table_rows.append("| " + " | ".join(cells) + " |")
+
+                table = "\n".join([header, separator] + table_rows)
+                if row_count > 20:
+                    table += f"\n\n*Showing 20 of {row_count} rows.*"
+                sections.append(table)
+
+            # Error results
+            if "error" in res:
+                sections.append(f"**Error:** {res['error']}")
+
+        return "\n\n".join(sections) if sections else "Analysis complete. See the tool call details above for raw data."
 
     async def _openrouter_chat(self, system_prompt: str, user_query: str, tool_executor) -> dict:
         """OpenRouter chat with function calling."""

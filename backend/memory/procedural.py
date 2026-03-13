@@ -14,7 +14,17 @@ class ProceduralMemory:
     def _load(self) -> dict:
         if os.path.exists(self.json_path):
             with open(self.json_path, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+            # Migrate: ensure execution_log exists on all procedures
+            changed = False
+            for proc in data.values():
+                if "execution_log" not in proc:
+                    proc["execution_log"] = []
+                    changed = True
+            if changed:
+                with open(self.json_path, "w") as f:
+                    json.dump(data, f, indent=2)
+            return data
         return {}
 
     def _save(self):
@@ -86,6 +96,46 @@ class ProceduralMemory:
             "changes": change_record["changes"],
         }
 
+    def log_execution(
+        self,
+        name: str,
+        params: dict,
+        outcome: str,
+        session_id: str | None = None,
+    ) -> None:
+        """Log a procedure execution outcome. Outcomes: resolved | unresolved | escalated | informational."""
+        if name not in self.procedures:
+            return
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "params": params,
+            "outcome": outcome,
+            "session_id": session_id,
+        }
+        log = self.procedures[name].setdefault("execution_log", [])
+        log.append(record)
+        # Rolling window — keep last 50
+        if len(log) > 50:
+            self.procedures[name]["execution_log"] = log[-50:]
+        self._save()
+
+    def get_procedure_effectiveness(self, name: str) -> dict:
+        """Return execution stats and resolved rate for a procedure."""
+        if name not in self.procedures:
+            return {}
+        log = self.procedures[name].get("execution_log", [])
+        if not log:
+            return {"total_runs": 0, "resolved_rate": None, "last_run": None}
+        resolved = sum(1 for e in log if e.get("outcome") == "resolved")
+        return {
+            "total_runs": len(log),
+            "resolved_count": resolved,
+            "resolved_rate": round(resolved / len(log) * 100, 1),
+            "unresolved_count": sum(1 for e in log if e.get("outcome") == "unresolved"),
+            "escalated_count": sum(1 for e in log if e.get("outcome") == "escalated"),
+            "last_run": log[-1]["timestamp"] if log else None,
+        }
+
     def format_for_prompt(self, procedure_name: str = None) -> str:
         """Format procedures for LLM prompt injection."""
         if procedure_name:
@@ -107,6 +157,9 @@ class ProceduralMemory:
             if proc.get("modification_history"):
                 last_mod = proc["modification_history"][-1]
                 lines.append(f"**Last modified:** v{last_mod['from_version']}→v{last_mod['to_version']} at {last_mod['timestamp']}")
+            eff = self.get_procedure_effectiveness(name)
+            if eff.get("total_runs", 0) > 0:
+                lines.append(f"**Effectiveness:** {eff['resolved_rate']}% resolved ({eff['total_runs']} runs)")
         return "\n".join(lines)
 
     def _format_single(self, proc: dict) -> str:

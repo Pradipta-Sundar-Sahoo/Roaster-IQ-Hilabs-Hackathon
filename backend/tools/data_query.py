@@ -37,17 +37,135 @@ def query_metrics(sql_where: str = None, columns: list = None, limit: int = 100)
 
 
 def execute_sql(sql: str) -> dict:
-    """Execute arbitrary SQL query (read-only)."""
+    """Execute arbitrary SQL query (read-only) with error recovery hints."""
     sql_lower = sql.strip().lower()
     if any(kw in sql_lower for kw in ["drop", "delete", "insert", "update", "alter", "create"]):
         return {"error": "Only SELECT queries are allowed"}
 
-    df = query(sql)
-    return {
-        "data": df.to_dict(orient="records"),
-        "row_count": len(df),
-        "columns": list(df.columns),
+    try:
+        df = query(sql)
+        return {
+            "data": df.to_dict(orient="records"),
+            "row_count": len(df),
+            "columns": list(df.columns),
+        }
+    except Exception as e:
+        error_msg = str(e)
+        # Build schema hints so LLM can self-correct
+        hints = _get_schema_hints(sql, error_msg)
+        return {
+            "error": f"SQL_ERROR: {error_msg}",
+            "failed_sql": sql,
+            "hints": hints,
+            "instruction": "Fix the SQL based on the error and hints above, then call query_data again with the corrected query.",
+        }
+
+
+def _get_schema_hints(failed_sql: str, error_msg: str) -> dict:
+    """Build schema hints relevant to the failed query to help LLM self-correct."""
+    hints = {}
+    conn = get_connection()
+
+    # Detect which tables the query references
+    sql_lower = failed_sql.lower()
+    tables = ["roster", "metrics", "state_summary", "org_summary", "stage_health_summary"]
+    referenced = [t for t in tables if t in sql_lower]
+    if not referenced:
+        referenced = ["roster", "metrics"]  # default — most queries hit these
+
+    for table in referenced:
+        try:
+            cols_df = conn.execute(f"DESCRIBE {table}").fetchdf()
+            hints[f"{table}_columns"] = [
+                f"{row['column_name']} ({row['column_type']})"
+                for _, row in cols_df.iterrows()
+            ]
+        except Exception:
+            pass
+
+    # --- Detect known LLM hallucination patterns and give targeted fixes ---
+    corrections = []
+
+    if "status" in sql_lower and "is_failed" not in sql_lower and "is_stuck" not in sql_lower and "failure_status" not in sql_lower:
+        corrections.append(
+            "There is NO 'status' column. Use IS_FAILED=1 for failed ROs, IS_STUCK=1 for stuck ROs."
+        )
+    if "top_failure_category" in sql_lower and "org_summary" in sql_lower:
+        corrections.append(
+            "org_summary does NOT have TOP_FAILURE_CATEGORY. "
+            "That column only exists in state_summary. "
+            "For top failure category per org, query roster: "
+            "SELECT ORG_NM, FAILURE_CATEGORY, COUNT(*) as cnt FROM roster WHERE IS_FAILED=1 "
+            "GROUP BY ORG_NM, FAILURE_CATEGORY ORDER BY ORG_NM, cnt DESC"
+        )
+    if "top_failing_org" in sql_lower and "org_summary" in sql_lower:
+        corrections.append(
+            "org_summary does NOT have TOP_FAILING_ORG. That column only exists in state_summary."
+        )
+    if "attempt_number" in sql_lower or "retry_count" in sql_lower or "attempt_count" in sql_lower:
+        corrections.append(
+            "There is NO 'attempt_number' or 'retry_count' column. Use RUN_NO (INTEGER) for the run number."
+        )
+    if "= true" in sql_lower or "= false" in sql_lower or "is true" in sql_lower or "is false" in sql_lower:
+        corrections.append(
+            "IS_FAILED, IS_STUCK, IS_RETRY are INTEGER columns (0 or 1), NOT boolean. "
+            "Use IS_FAILED=1 (not IS_FAILED=TRUE), IS_RETRY=1 (not IS_RETRY=TRUE)."
+        )
+    if "failure_type" in sql_lower or "fail_category" in sql_lower:
+        corrections.append(
+            "The failure grouping column is FAILURE_CATEGORY (not failure_type). "
+            "Values: 'validation', 'timeout', 'processing', 'compliance', 'none', 'other'."
+        )
+    if " table " in sql_lower and "create table" not in sql_lower:
+        corrections.append(
+            "'table' is a reserved keyword in SQL — do not use it as a table alias. "
+            "Remove 'table' keyword: write 'FROM roster r' not 'FROM roster table'."
+        )
+    # State name checks
+    state_names = {
+        "tennessee": "TN", "new york": "NY", "california": "CA", "texas": "TX",
+        "florida": "FL", "ohio": "OH", "south carolina": "SC", "colorado": "CO",
+        "georgia": "GA", "indiana": "IN", "kentucky": "KY", "virginia": "VA",
+        "washington": "WA", "illinois": "IL", "michigan": "MI",
     }
+    for name, code in state_names.items():
+        if f"'{name}'" in sql_lower or f'"{name}"' in sql_lower:
+            corrections.append(
+                f"State names are stored as 2-letter codes. Use '{code}' instead of '{name.title()}'."
+            )
+
+    if corrections:
+        hints["CORRECTIONS_REQUIRED"] = corrections
+
+    # Add common DuckDB gotchas
+    error_lower = error_msg.lower()
+    if "binder" in error_lower and "column" in error_lower:
+        hints["tip"] = (
+            "Column not found in FROM clause. Check the column list above for correct names. "
+            "Key reminders: no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), "
+            "IS_RETRY is INTEGER (use =1 not =TRUE)."
+        )
+    elif "subquery" in error_lower and "column" in error_lower:
+        hints["tip"] = "Subquery column mismatch. Use JOIN instead of (col1,col2) IN (SELECT ...). DuckDB IN() expects single-column subqueries."
+    elif "conversion" in error_lower or "cast" in error_lower:
+        hints["tip"] = "Type error. Use CAST() or TRY_CAST(). Dates: CAST(col AS TIMESTAMP). Strings to numbers: TRY_CAST(col AS DOUBLE)."
+    elif "strptime" in error_lower or "strftime" in error_lower:
+        hints["tip"] = "Date parsing error. MONTH column is 'MM-YYYY' format. Use precomputed MONTH_DATE column instead of STRPTIME."
+    elif "syntax" in error_lower:
+        hints["tip"] = (
+            "SQL syntax error. DuckDB uses standard SQL. "
+            "Do NOT use 'table' as a table alias — it is a reserved keyword. "
+            "Other common issues: no LIMIT inside CTEs, use ILIKE for case-insensitive LIKE."
+        )
+
+    # Add available tables list
+    hints["available_tables"] = tables
+    hints["instruction"] = (
+        "Fix ALL issues listed in CORRECTIONS_REQUIRED and tip above, "
+        "then call query_data again with the corrected SQL."
+    )
+
+    return hints
 
 
 def get_stuck_ros() -> dict:
@@ -148,9 +266,10 @@ def get_retry_analysis() -> dict:
             r2.FAILURE_STATUS as latest_run_failure
         FROM roster r1
         JOIN (
-            SELECT RO_ID, RUN_NO, LATEST_STAGE_NM, IS_FAILED, FAILURE_STATUS
-            FROM roster
-            WHERE (RO_ID, RUN_NO) IN (SELECT RO_ID, MAX(RUN_NO) FROM roster WHERE RUN_NO > 1 GROUP BY RO_ID)
+            SELECT r.RO_ID, r.RUN_NO, r.LATEST_STAGE_NM, r.IS_FAILED, r.FAILURE_STATUS
+            FROM roster r
+            JOIN (SELECT RO_ID, MAX(RUN_NO) as max_run FROM roster WHERE RUN_NO > 1 GROUP BY RO_ID) m
+                ON r.RO_ID = m.RO_ID AND r.RUN_NO = m.max_run
         ) r2 ON r1.RO_ID = r2.RO_ID
         WHERE r1.RUN_NO = 1
         LIMIT 200

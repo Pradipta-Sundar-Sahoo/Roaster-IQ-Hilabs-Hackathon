@@ -20,6 +20,8 @@ from tools.visualizations import (
 )
 from procedures.engine import execute_procedure
 from prompts import SUPERVISOR_SYSTEM_PROMPT, ENTITY_EXTRACTION_PROMPT
+from agents.pipeline_agent import PipelineAgent
+from agents.quality_agent import QualityAgent
 
 # Configure Gemini
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
@@ -30,7 +32,7 @@ TOOL_DECLARATIONS = [
         function_declarations=[
             genai.protos.FunctionDeclaration(
                 name="query_data",
-                description="Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax. The roster table has ~60K rows of Roster Operations with columns like RO_ID, ORG_NM, CNT_STATE, LOB, SRC_SYS, IS_STUCK, IS_FAILED, FAILURE_STATUS, LATEST_STAGE_NM, FILE_RECEIVED_DT, health flag columns (*_HEALTH), duration columns (*_DURATION), etc. The metrics table has ~357 rows with MONTH, MARKET, SCS_PERCENT, FIRST_ITER_SCS_CNT, NEXT_ITER_SCS_CNT, etc.",
+                description="Execute a SQL query against the roster or metrics table. Use DuckDB SQL syntax. CRITICAL: (1) CNT_STATE and MARKET use 2-letter state codes (TN, NY, CA), NEVER full names. (2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. (3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO. roster columns: RO_ID, ORG_NM, CNT_STATE, LOB, SRC_SYS, RUN_NO, IS_STUCK, IS_FAILED, FAILURE_STATUS, LATEST_STAGE_NM, *_HEALTH, *_DURATION; precomputed: DAYS_STUCK, RED_COUNT, HEALTH_SCORE, PRIORITY, FAILURE_CATEGORY, IS_RETRY, WORST_HEALTH_STAGE. metrics columns: MONTH, MARKET, SCS_PERCENT; precomputed: MONTH_DATE, RETRY_LIFT_PCT, IS_BELOW_SLA, OVERALL_FAIL_RATE.",
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
@@ -99,17 +101,46 @@ TOOL_DECLARATIONS = [
                     required=["procedure_name", "change_description"],
                 ),
             ),
+            genai.protos.FunctionDeclaration(
+                name="update_semantic_knowledge",
+                description=(
+                    "Update the domain knowledge base when web search reveals new regulatory information, "
+                    "new LOB types, new failure patterns, or corrections to existing knowledge. "
+                    "Call this after web_search returns regulatory updates so the information is permanently remembered."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "category": genai.protos.Schema(type=genai.protos.Type.STRING, description="Knowledge category: lob_meanings, failure_statuses, source_systems, pipeline_stages, data_notes"),
+                        "key": genai.protos.Schema(type=genai.protos.Type.STRING, description="The specific key or name to add/update"),
+                        "value": genai.protos.Schema(type=genai.protos.Type.STRING, description="The value or description to store"),
+                        "reason": genai.protos.Schema(type=genai.protos.Type.STRING, description="Why this knowledge is being added (e.g., 'CMS ruling found via web search')"),
+                    },
+                    required=["category", "key", "value", "reason"],
+                ),
+            ),
         ]
     )
 ]
 
 
 class SupervisorAgent:
-    def __init__(self, episodic_memory: EpisodicMemory, procedural_memory: ProceduralMemory, semantic_memory: SemanticMemory):
+    def __init__(
+        self,
+        episodic_memory: EpisodicMemory,
+        procedural_memory: ProceduralMemory,
+        semantic_memory: SemanticMemory,
+        pipeline=None,
+        vector_store=None,
+    ):
         self.episodic = episodic_memory
         self.procedural = procedural_memory
         self.semantic = semantic_memory
+        self.pipeline = pipeline
+        self.vector_store = vector_store
         self.model = genai.GenerativeModel("gemini-2.5-flash")
+        self.pipeline_agent = PipelineAgent()
+        self.quality_agent = QualityAgent()
 
         from agents.llm_provider import LLMProvider
         self.llm = LLMProvider()
@@ -123,29 +154,75 @@ class SupervisorAgent:
         # 1. Extract entities
         entities = self._extract_entities(user_query)
 
-        # 2. Build compact system prompt
-        past = self.episodic.search_by_entities(entities, limit=3)
+        # 2. Build enriched episodic context
+        past = self.episodic.search_semantic(user_query, limit=5)
         if not past:
-            past = self.episodic.search_by_query_text(user_query, limit=2)
+            past = self.episodic.search_by_entities(entities, limit=3)
+
+        ep_lines = []
         if past:
-            ep_lines = ["## Recent Investigations"]
-            for ep in past[:3]:
-                ep_lines.append(f"- [{str(ep.get('timestamp',''))[:19]}] \"{str(ep.get('query',''))[:80]}\" → {str(ep.get('findings_summary',''))[:150]}")
-            episodic_context = "\n".join(ep_lines)
-        else:
-            episodic_context = ""
-        system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(episodic_context=episodic_context)
+            ep_lines.append("## Relevant Past Investigations")
+            for ep in past[:5]:
+                ts = str(ep.get("timestamp", ""))[:19]
+                q = str(ep.get("query", ""))[:100]
+                findings = str(ep.get("findings_summary", ""))[:300]
+                proc = ep.get("procedure_used", "")
+                source = ep.get("_source", "episode")
+                prefix = "[DIGEST] " if source == "digest" else ""
+                ep_lines.append(f"- [{ts}] {prefix}\"{q}\"")
+                if findings:
+                    ep_lines.append(f"  Findings: {findings}")
+                if proc:
+                    ep_lines.append(f"  Procedure used: {proc}")
+                for state in entities.get("states", []):
+                    if state in str(ep.get("entities_json", "")):
+                        ep_lines.append(f"  (Previously investigated {state})")
+                        break
 
-        # 4. Call LLM with tools (Gemini primary, OpenRouter fallback)
+        proc_eff_lines = []
+        for proc_name in self.procedural.get_procedure_names():
+            eff = self.procedural.get_procedure_effectiveness(proc_name)
+            if eff.get("total_runs", 0) > 0:
+                proc_eff_lines.append(
+                    f"- {proc_name}: {eff['resolved_rate']}% resolved over {eff['total_runs']} runs"
+                )
+        if proc_eff_lines:
+            ep_lines.append("\n## Procedure Effectiveness History")
+            ep_lines.extend(proc_eff_lines)
+
+        episodic_context = "\n".join(ep_lines) if ep_lines else ""
+
+        # 3. Route: pipeline for general queries, sub-agents for specialized intents
+        intent = entities.get("intent", "general")
+
         def tool_executor(tool_name, tool_args):
-            return self._execute_tool(tool_name, tool_args)
+            return self._execute_tool(tool_name, tool_args, session_id=session_id)
 
-        llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
+        if intent == "triage":
+            agent_name = "pipeline_agent"
+            llm_result = await self.pipeline_agent.handle(user_query, tool_executor, episodic_context)
+        elif intent in ("audit", "report", "analysis"):
+            agent_name = "quality_agent"
+            llm_result = await self.quality_agent.handle(user_query, tool_executor, episodic_context)
+        elif self.pipeline:
+            agent_name = "pipeline"
+            try:
+                llm_result = await self.pipeline.process(
+                    user_query, session_id, tool_executor, episodic_context=episodic_context
+                )
+            except Exception as e:
+                print(f"  [supervisor] Pipeline failed ({e}), falling back to direct LLM")
+                system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(episodic_context=episodic_context)
+                agent_name = "supervisor"
+                llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
+        else:
+            agent_name = "supervisor"
+            system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(episodic_context=episodic_context)
+            llm_result = await self.llm.chat_with_tools(system_prompt, user_query, tool_executor)
 
         tools_used = llm_result.get("tools_used", [])
         final_text = llm_result.get("final_text", "")
 
-        # Collect charts and web results from tool results
         for tr in llm_result.get("tool_results", []):
             result = tr.get("result", {})
             if isinstance(result, dict):
@@ -161,7 +238,7 @@ class SupervisorAgent:
         if not final_text:
             final_text = "I processed your query but couldn't generate a text response. Please try rephrasing."
 
-        # 7. Log to episodic memory
+        # 4. Log to episodic memory
         findings_summary = final_text[:500]
         data_snapshot = self._create_snapshot(entities)
         episode_id = self.episodic.log_episode(
@@ -175,7 +252,14 @@ class SupervisorAgent:
             data_snapshot=data_snapshot,
         )
 
-        # 8. Check for state changes
+        # 5. Index episode into ChromaDB for vector search
+        if self.vector_store:
+            try:
+                self.vector_store.index_episode(episode_id, user_query, findings_summary)
+            except Exception:
+                pass
+
+        # 6. Check for state changes
         state_changes = self._detect_state_changes(entities, data_snapshot, episode_id)
 
         return {
@@ -186,8 +270,9 @@ class SupervisorAgent:
                 "state_changes": state_changes,
             },
             "web_search_results": web_results,
+            "tool_results": llm_result.get("tool_results", []),
             "procedure_used": procedure_used,
-            "agent_used": self._classify_agent(entities),
+            "agent_used": agent_name,
         }
 
     def _extract_entities(self, query: str) -> dict:
@@ -249,7 +334,7 @@ class SupervisorAgent:
             "intent": intent,
         }
 
-    def _execute_tool(self, tool_name: str, args: dict) -> dict:
+    def _execute_tool(self, tool_name: str, args: dict, session_id: str | None = None) -> dict:
         """Execute a tool call and return results."""
         try:
             if tool_name == "query_data":
@@ -267,7 +352,26 @@ class SupervisorAgent:
                     except json.JSONDecodeError:
                         params = {}
                 procedure = self.procedural.get_procedure(proc_name)
-                return execute_procedure(procedure, params)
+                result = execute_procedure(procedure, params)
+                # Log effectiveness
+                outcome = "informational"
+                if isinstance(result, dict):
+                    stuck_count = result.get("stuck_count", -1)
+                    summary = result.get("summary", "").lower()
+                    if stuck_count == 0:
+                        outcome = "resolved"
+                    elif "critical" in summary or stuck_count > 0:
+                        outcome = "unresolved"
+                self.procedural.log_execution(proc_name, params, outcome, session_id)
+                return result
+
+            elif tool_name == "update_semantic_knowledge":
+                return self.semantic.update_knowledge(
+                    category=args.get("category", "data_notes"),
+                    key=args.get("key", ""),
+                    value=args.get("value", ""),
+                    reason=args.get("reason", ""),
+                )
 
             elif tool_name == "create_chart":
                 return self._create_chart(args.get("chart_type", ""), args.get("params", "{}"))
@@ -400,52 +504,106 @@ class SupervisorAgent:
         except Exception as e:
             return {"error": f"Chart creation failed: {str(e)}"}
 
-    def _classify_agent(self, entities: dict) -> str:
-        """Determine which sub-agent would handle this query."""
-        intent = entities.get("intent", "general")
-        if intent in ("triage",):
-            return "pipeline_agent"
-        elif intent in ("audit", "report", "analysis"):
-            return "quality_agent"
-        return "supervisor"
-
     def _create_snapshot(self, entities: dict) -> dict:
-        """Create a data snapshot for episodic memory."""
+        """Create a rich data snapshot for episodic memory — global + per-state."""
         from data_loader import query as db_query
         try:
-            snapshot = {
+            snapshot: dict = {
                 "stuck_count": int(db_query("SELECT COUNT(*) as c FROM roster WHERE IS_STUCK=1").iloc[0]["c"]),
                 "failed_count": int(db_query("SELECT COUNT(*) as c FROM roster WHERE IS_FAILED=1").iloc[0]["c"]),
+                "stuck_by_state": {},
+                "failed_by_state": {},
+                "red_flag_by_state": {},
+                "scs_percent_by_state": {},
+                "top_failing_org_by_state": {},
             }
-            # Add state-specific data if states are mentioned
-            for state in entities.get("states", []):
-                market = db_query(f"SELECT SCS_PERCENT FROM metrics WHERE MARKET='{state}' ORDER BY MONTH DESC LIMIT 1")
-                if not market.empty:
-                    snapshot[f"{state}_scs_percent"] = float(market.iloc[0]["SCS_PERCENT"])
+
+            stuck_df = db_query("SELECT CNT_STATE, COUNT(*) as cnt FROM roster WHERE IS_STUCK=1 GROUP BY CNT_STATE")
+            for _, r in stuck_df.iterrows():
+                snapshot["stuck_by_state"][r["CNT_STATE"]] = int(r["cnt"])
+
+            failed_df = db_query("SELECT CNT_STATE, COUNT(*) as cnt FROM roster WHERE IS_FAILED=1 GROUP BY CNT_STATE")
+            for _, r in failed_df.iterrows():
+                snapshot["failed_by_state"][r["CNT_STATE"]] = int(r["cnt"])
+
+            red_df = db_query("""
+                SELECT CNT_STATE,
+                  SUM(CASE WHEN PRE_PROCESSING_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN MAPPING_APROVAL_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN ISF_GEN_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_GEN_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_REVIEW_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN DART_UI_VALIDATION_HEALTH='Red' THEN 1 ELSE 0 END +
+                      CASE WHEN SPS_LOAD_HEALTH='Red' THEN 1 ELSE 0 END) as red_total
+                FROM roster GROUP BY CNT_STATE
+            """)
+            for _, r in red_df.iterrows():
+                snapshot["red_flag_by_state"][r["CNT_STATE"]] = int(r["red_total"] or 0)
+
+            scs_df = db_query(
+                "SELECT MARKET, SCS_PERCENT FROM metrics WHERE (MARKET, MONTH) IN "
+                "(SELECT MARKET, MAX(MONTH) FROM metrics GROUP BY MARKET)"
+            )
+            for _, r in scs_df.iterrows():
+                snapshot["scs_percent_by_state"][r["MARKET"]] = float(r["SCS_PERCENT"])
+
+            top_org_df = db_query("""
+                SELECT CNT_STATE, ORG_NM FROM (
+                    SELECT CNT_STATE, ORG_NM, COUNT(*) as failures,
+                           ROW_NUMBER() OVER (PARTITION BY CNT_STATE ORDER BY COUNT(*) DESC) as rn
+                    FROM roster WHERE IS_FAILED=1 GROUP BY CNT_STATE, ORG_NM
+                ) t WHERE rn=1
+            """)
+            for _, r in top_org_df.iterrows():
+                snapshot["top_failing_org_by_state"][r["CNT_STATE"]] = r["ORG_NM"]
+
             return snapshot
         except Exception:
             return {}
 
     def _detect_state_changes(self, entities: dict, current_snapshot: dict, episode_id: int) -> list:
-        """Detect and log state changes compared to previous snapshots."""
+        """Detect and log state changes compared to the global previous snapshot."""
         changes = []
-        for state in entities.get("states", []):
-            prev_snapshot = self.episodic.get_latest_snapshot_for_entity("market", state)
-            if prev_snapshot:
-                # Compare SCS_PERCENT
-                prev_scs = prev_snapshot.get(f"{state}_scs_percent")
-                curr_scs = current_snapshot.get(f"{state}_scs_percent")
-                if prev_scs is not None and curr_scs is not None and prev_scs != curr_scs:
-                    self.episodic.log_state_change(
-                        "market", state, "SCS_PERCENT",
-                        str(prev_scs), str(curr_scs), episode_id
-                    )
-                    changes.append({
-                        "entity": state,
-                        "field": "SCS_PERCENT",
-                        "old": prev_scs,
-                        "new": curr_scs,
-                    })
+
+        prev_snapshot = self.episodic.get_latest_rich_snapshot()
+
+        if not prev_snapshot or "stuck_by_state" not in prev_snapshot:
+            # First session or pre-upgrade snapshot — no comparison possible
+            for ro_id in entities.get("ro_ids", []):
+                prev = self.episodic.get_latest_snapshot_for_entity("ro", ro_id)
+                if prev:
+                    changes.append({"entity": ro_id, "field": "checked", "note": "Previously investigated"})
+            return changes
+
+        fields_to_compare = [
+            ("stuck_by_state", "stuck_RO_count"),
+            ("failed_by_state", "failed_RO_count"),
+            ("red_flag_by_state", "red_flag_count"),
+            ("scs_percent_by_state", "SCS_PERCENT"),
+            ("top_failing_org_by_state", "top_failing_org"),
+        ]
+
+        for field_key, field_label in fields_to_compare:
+            prev_map = prev_snapshot.get(field_key, {})
+            curr_map = current_snapshot.get(field_key, {})
+            all_states = set(list(prev_map.keys()) + list(curr_map.keys()))
+            for state in all_states:
+                old_val = prev_map.get(state)
+                new_val = curr_map.get(state)
+                if old_val is None or new_val is None or old_val == new_val:
+                    continue
+                self.episodic.log_state_change(
+                    "market", state, field_label,
+                    str(old_val), str(new_val), episode_id
+                )
+                narrative = self._format_change_narrative(state, field_label, old_val, new_val)
+                changes.append({
+                    "entity": state,
+                    "field": field_label,
+                    "old": old_val,
+                    "new": new_val,
+                    "narrative": narrative,
+                })
 
         # Check stuck ROs
         for ro_id in entities.get("ro_ids", []):
@@ -454,6 +612,24 @@ class SupervisorAgent:
                 changes.append({"entity": ro_id, "field": "checked", "note": "Previously investigated"})
 
         return changes
+
+    def _format_change_narrative(self, state: str, field: str, old, new) -> str:
+        """Return a human-readable description of a state change."""
+        if field == "stuck_RO_count":
+            direction = "resolved" if new < old else "increased"
+            return f"{state}: stuck ROs {direction} ({old} → {new})"
+        elif field == "SCS_PERCENT":
+            direction = "fell" if new < old else "rose"
+            return f"{state}: SCS_PERCENT {direction} from {old:.1f}% → {new:.1f}%"
+        elif field == "failed_RO_count":
+            direction = "decreased" if new < old else "increased"
+            return f"{state}: failed ROs {direction} ({old} → {new})"
+        elif field == "red_flag_count":
+            direction = "decreased" if new < old else "increased"
+            return f"{state}: Red health flags {direction} ({old} → {new})"
+        elif field == "top_failing_org":
+            return f"{state}: top failing org changed from '{old}' → '{new}'"
+        return f"{state}: {field} changed ({old} → {new})"
 
     async def generate_proactive_alerts(self) -> list:
         """Generate proactive monitoring alerts by scanning data."""

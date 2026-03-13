@@ -1,41 +1,123 @@
-"""Record Quality Agent — specialized in failure rates, market metrics, retry analysis."""
+"""Record Quality Agent — failure rates, market metrics, retry effectiveness."""
 
+import os
+import google.generativeai as genai
 from prompts import QUALITY_AGENT_PROMPT
+
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+
+QUALITY_TOOL_DECLARATIONS = [
+    genai.protos.Tool(
+        function_declarations=[
+            genai.protos.FunctionDeclaration(
+                name="query_data",
+                description=(
+                    "Execute a SQL query against roster or metrics tables. DuckDB syntax. "
+                    "CRITICAL: (1) CNT_STATE/MARKET use 2-letter codes (TN, NY, CA), NEVER full names. "
+                    "(2) IS_FAILED/IS_STUCK/IS_RETRY are INTEGER — use =1 not =TRUE. "
+                    "(3) No 'status' column — use IS_FAILED=1. (4) No 'attempt_number' — use RUN_NO. "
+                    "roster: RO_ID, ORG_NM, CNT_STATE, RUN_NO, IS_FAILED, IS_STUCK, FAILURE_STATUS, LATEST_STAGE_NM, "
+                    "FAIL_REC_CNT, REJ_REC_CNT, SCS_PCT; precomputed: FAILURE_CATEGORY, IS_RETRY, RED_COUNT, HEALTH_SCORE, PRIORITY. "
+                    "metrics: MONTH, MARKET, SCS_PERCENT; precomputed: MONTH_DATE, RETRY_LIFT_PCT, IS_BELOW_SLA, OVERALL_FAIL_RATE. "
+                    "Join on roster.CNT_STATE = metrics.MARKET."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "sql": genai.protos.Schema(type=genai.protos.Type.STRING, description="SQL SELECT query"),
+                    },
+                    required=["sql"],
+                ),
+            ),
+            genai.protos.FunctionDeclaration(
+                name="run_procedure",
+                description=(
+                    "Run a quality diagnostic procedure. Available: "
+                    "record_quality_audit (failure rates by state/org, flags above threshold), "
+                    "market_health_report (correlate SCS% with file failures — requires market param), "
+                    "retry_effectiveness_analysis (compare first-pass vs retry success rates)."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "procedure_name": genai.protos.Schema(type=genai.protos.Type.STRING, description="record_quality_audit | market_health_report | retry_effectiveness_analysis"),
+                        "params": genai.protos.Schema(type=genai.protos.Type.STRING, description="JSON params e.g. {\"state\": \"TN\", \"market\": \"New York\"}"),
+                    },
+                    required=["procedure_name"],
+                ),
+            ),
+            genai.protos.FunctionDeclaration(
+                name="create_chart",
+                description=(
+                    "Create a quality or market visualization. "
+                    "Types: failure_breakdown (failure types by state), "
+                    "market_trend (SCS% over time by market), "
+                    "retry_lift (first-iter vs overall success comparison)."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "chart_type": genai.protos.Schema(type=genai.protos.Type.STRING, description="failure_breakdown | market_trend | retry_lift"),
+                        "params": genai.protos.Schema(type=genai.protos.Type.STRING, description="JSON params e.g. {\"market\": \"New York\"}"),
+                    },
+                    required=["chart_type"],
+                ),
+            ),
+            genai.protos.FunctionDeclaration(
+                name="web_search",
+                description=(
+                    "Search the web for regulatory context, CMS compliance rules, or LOB-specific "
+                    "requirements that explain failure patterns. Use when FAIL_REC_CNT or REJ_REC_CNT "
+                    "is elevated and a regulatory cause is suspected."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "query": genai.protos.Schema(type=genai.protos.Type.STRING, description="Search query"),
+                        "search_type": genai.protos.Schema(type=genai.protos.Type.STRING, description="regulatory | compliance | lob | org | general"),
+                    },
+                    required=["query"],
+                ),
+            ),
+            genai.protos.FunctionDeclaration(
+                name="update_semantic_knowledge",
+                description=(
+                    "Permanently store regulatory/compliance insights found via web search. "
+                    "Call after web_search returns regulatory updates so the knowledge persists."
+                ),
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties={
+                        "category": genai.protos.Schema(type=genai.protos.Type.STRING, description="lob_meanings | failure_statuses | source_systems | pipeline_stages | data_notes"),
+                        "key": genai.protos.Schema(type=genai.protos.Type.STRING, description="The key or name to add/update"),
+                        "value": genai.protos.Schema(type=genai.protos.Type.STRING, description="The value or description to store"),
+                        "reason": genai.protos.Schema(type=genai.protos.Type.STRING, description="Why this is being added, e.g. 'CMS ruling found via web search'"),
+                    },
+                    required=["category", "key", "value", "reason"],
+                ),
+            ),
+        ]
+    )
+]
 
 
 class QualityAgent:
-    """Sub-agent focused on record quality and market health analysis.
-
-    In the multi-agent architecture, the Supervisor delegates quality-specific
-    queries to this agent. It specializes in:
-    - Failure rate analysis by state/org/LOB
-    - Market SCS_PERCENT correlation with file-level quality
-    - Retry effectiveness analysis
-    - Cross-table correlation between CSV1 and CSV2
-    """
+    """Sub-agent for record quality, market metrics, and retry effectiveness."""
 
     def __init__(self):
         self.role = "record_quality"
-        self.prompt = QUALITY_AGENT_PROMPT
         self.procedures = ["record_quality_audit", "market_health_report", "retry_effectiveness_analysis"]
-        self.primary_tables = ["roster", "metrics"]
 
-    def get_context(self) -> str:
-        """Return agent-specific context for the supervisor prompt."""
-        return self.prompt
+    async def handle(self, user_query: str, tool_executor, episodic_context: str = "") -> dict:
+        """Run quality-focused Gemini chat. Returns {final_text, tools_used, tool_results}."""
+        from agents.llm_provider import LLMProvider
+        llm = LLMProvider()
 
-    def get_relevant_queries(self, intent: str) -> list[str]:
-        """Suggest relevant SQL queries based on intent."""
-        queries = {
-            "audit": [
-                "SELECT CNT_STATE, COUNT(*) as total, SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END) as failed FROM roster GROUP BY CNT_STATE",
-                "SELECT FAILURE_STATUS, COUNT(*) FROM roster WHERE IS_FAILED=1 GROUP BY FAILURE_STATUS",
-            ],
-            "report": [
-                "SELECT MARKET, MONTH, SCS_PERCENT FROM metrics ORDER BY MARKET, MONTH",
-            ],
-            "analysis": [
-                "SELECT RO_ID, RUN_NO, IS_FAILED FROM roster WHERE RO_ID IN (SELECT RO_ID FROM roster WHERE RUN_NO > 1) ORDER BY RO_ID, RUN_NO",
-            ],
-        }
-        return queries.get(intent, [])
+        system_prompt = QUALITY_AGENT_PROMPT
+        if episodic_context:
+            system_prompt += f"\n\n{episodic_context}"
+
+        return await llm.chat_with_tools(
+            system_prompt, user_query, tool_executor,
+            tool_declarations=QUALITY_TOOL_DECLARATIONS,
+        )

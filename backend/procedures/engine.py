@@ -281,9 +281,10 @@ def _execute_retry_analysis(procedure: dict, params: dict) -> dict:
             FROM roster WHERE RUN_NO = 1
         ),
         latest_runs AS (
-            SELECT RO_ID, RUN_NO, LATEST_STAGE_NM as retry_stage, IS_FAILED as retry_failed, FAILURE_STATUS as retry_failure
-            FROM roster
-            WHERE (RO_ID, RUN_NO) IN (SELECT RO_ID, MAX(RUN_NO) FROM roster WHERE RUN_NO > 1 GROUP BY RO_ID)
+            SELECT r.RO_ID, r.RUN_NO, r.LATEST_STAGE_NM as retry_stage, r.IS_FAILED as retry_failed, r.FAILURE_STATUS as retry_failure
+            FROM roster r
+            JOIN (SELECT RO_ID, MAX(RUN_NO) as max_run FROM roster WHERE RUN_NO > 1 GROUP BY RO_ID) m
+                ON r.RO_ID = m.RO_ID AND r.RUN_NO = m.max_run
         )
         SELECT r1.RO_ID, r1.ORG_NM, r1.CNT_STATE,
                r1.LATEST_STAGE_NM as first_stage, r1.IS_FAILED as first_failed,
