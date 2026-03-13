@@ -31,38 +31,31 @@ Your agent operates over **two CSV files** that together represent the full pict
 
 Each row represents one Roster Operation (RO) - a roster file submitted by a provider organization, moving through the processing pipeline. It captures both **how the file moved through stages** and **how many records inside it succeeded or failed**.
 
-| Column | Description |
-| --- | --- |
-| `ID` | Surrogate primary key for the processing record |
-| `RO_ID` | Unique Roster Object identifier for the file/job execution |
-| `RA_FILE_DETAILS_ID` | FK to file metadata (file name, received date, checksum) |
-| `RA_ROSTER_DETAILS_ID` | FK to roster configuration and roster-level details |
-| `RA_PLM_RO_PROF_DATA_ID` | FK to provider/professional master data used during processing |
-| `SRC_SYS` | Source system (e.g., AvailityPDM, Demographic, ProviderGroup) |
-| `ORG_NM` | Provider organization name |
-| `CNT_STATE` | US state where the provider org operates |
-| `LOB` | Line of Business (e.g., Medicare, Medicaid HMO, Commercial PPO/EPO) |
-| `RUN_NO` | Processing iteration (1 = initial run, >1 = reprocessing attempt) |
-| `TOT_REC_CNT` | Total records received in the roster file |
-| `SCS_REC_CNT` | Records successfully processed |
-| `FAIL_REC_CNT` | Records that failed processing |
-| `SKIP_REC_CNT` | Records skipped due to business rules or duplication |
-| `REJ_REC_CNT` | Records rejected due to validation or compliance errors |
-| `SCS_PCT` | Success percentage for records within this file |
-| `FILE_STATUS_CD` | Numeric pipeline status (9=Stopped, 45=DART Review, 49=DART Generation, 99=Resolved) |
-| `LATEST_STAGE_NM` | Current pipeline stage name (STOPPED, DART_REVIEW, DART_GENERATION, RESOLVED) |
-| `PRE_PROCESSING_DURATION` | Time (mins) for pre-processing stage |
-| `MAPPING_APROVAL_DURATION` | Time (mins) for mapping approval |
-| `ISF_GEN_DURATION` | Time (mins) for ISF generation |
-| `DART_GEN_DURATION` | Time (mins) for DART generation |
-| `DART_REVIEW_DURATION` | Time (mins) for DART review |
-| `DART_UI_VALIDATION_DURATION` | Time (mins) for DART UI validation |
-| `SPS_LOAD_DURATION` | Time (mins) for SPS load |
-| `AVG_*_DURATION` | Historical average duration per stage (used for benchmarking) |
-| `PRE_PROCESSING_HEALTH` … `SPS_LOAD_HEALTH` | Per-stage health flag (Green / Yellow / Red); `SPS_LOAD_HEALTH` is derived from `SCS_PCT` |
-| `IS_STUCK` | Boolean - is this RO currently stuck in a stage? |
-| `IS_FAILED` | Boolean - has this RO failed? |
-| `FAILURE_STATUS` | Free-text failure reason (e.g., "Complete Validation Failure") |
+Column	Description
+ID	Surrogate primary key for the processing record
+RO_ID	Unique Roster Object identifier for the file/job execution
+RA_FILE_DETAILS_ID	FK to file metadata (file name, received date, checksum)
+RA_ROSTER_DETAILS_ID	FK to roster configuration and roster-level details
+RA_PLM_RO_PROF_DATA_ID	FK to provider/professional master data used during processing
+SRC_SYS	Source system (e.g., AvailityPDM, Demographic, ProviderGroup)
+ORG_NM	Provider organization name
+CNT_STATE	US state where the provider org operates
+LOB	Line of Business (e.g., Medicare, Medicaid HMO, Commercial PPO/EPO)
+RUN_NO	Processing iteration (1 = initial run, >1 = reprocessing attempt)
+FILE_STATUS_CD	Numeric pipeline status (9=Stopped, 45=DART Review, 49=DART Generation, 99=Resolved)
+LATEST_STAGE_NM	Current pipeline stage name (STOPPED, DART_REVIEW, DART_GENERATION, RESOLVED)
+PRE_PROCESSING_DURATION	Time (mins) for pre-processing stage
+MAPPING_APROVAL_DURATION	Time (mins) for mapping approval
+ISF_GEN_DURATION	Time (mins) for ISF generation
+DART_GEN_DURATION	Time (mins) for DART generation
+DART_REVIEW_DURATION	Time (mins) for DART review
+DART_UI_VALIDATION_DURATION	Time (mins) for DART UI validation
+SPS_LOAD_DURATION	Time (mins) for SPS load
+AVG_*_DURATION	Historical average duration per stage (used for benchmarking)
+PRE_PROCESSING_HEALTH … SPS_LOAD_HEALTH	Per-stage health flag (Green / Yellow / Red); SPS_LOAD_HEALTH is derived from SCS_PCT
+IS_STUCK	Boolean - is this RO currently stuck in a stage?
+IS_FAILED	Boolean - has this RO failed?
+FAILURE_STATUS	Free-text failure reason (e.g., "Complete Validation Failure")
 
 ---
 
