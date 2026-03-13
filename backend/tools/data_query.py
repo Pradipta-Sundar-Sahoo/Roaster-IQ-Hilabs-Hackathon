@@ -130,16 +130,16 @@ def _get_schema_hints(failed_sql: str, error_msg: str) -> dict:
 
 
 def get_stuck_ros() -> dict:
-    """Get all stuck ROs with computed days stuck."""
+    """Get all stuck ROs with computed DAYS_STUCK. All column names UPPERCASE."""
     df = query("""
         SELECT RO_ID, ORG_NM, CNT_STATE, LOB, SRC_SYS, LATEST_STAGE_NM,
                FILE_RECEIVED_DT, FILE_STATUS_CD, IS_FAILED, FAILURE_STATUS,
                PRE_PROCESSING_HEALTH, MAPPING_APROVAL_HEALTH, ISF_GEN_HEALTH,
                DART_GEN_HEALTH, DART_REVIEW_HEALTH, DART_UI_VALIDATION_HEALTH, SPS_LOAD_HEALTH,
-               DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days_stuck
+               DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) AS DAYS_STUCK
         FROM roster
         WHERE IS_STUCK = 1
-        ORDER BY days_stuck DESC
+        ORDER BY DAYS_STUCK DESC
     """)
     return {"data": df.to_dict(orient="records"), "row_count": len(df)}
 

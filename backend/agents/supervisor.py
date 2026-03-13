@@ -33,7 +33,7 @@ TOOL_DECLARATIONS = [
         function_declarations=[
             genai.protos.FunctionDeclaration(
                 name="query_data",
-                description="Execute a SQL query (DuckDB). Use EXACT column names from the schema — do NOT expand abbreviations. CRITICAL: CNT_STATE/MARKET=2-letter codes, IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1 not =TRUE), no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), 'table' is reserved.",
+                description="Execute a SQL query (DuckDB). ALL column names and aliases MUST be UPPERCASE (DAYS_STUCK, RED_COUNT, PRIORITY, etc.). Use EXACT column names from schema. CNT_STATE/MARKET=2-letter codes. IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1). No 'status' (use IS_FAILED=1), no 'attempt_number' (use RUN_NO).",
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
@@ -56,7 +56,7 @@ TOOL_DECLARATIONS = [
             ),
             genai.protos.FunctionDeclaration(
                 name="run_procedure",
-                description="Run a named diagnostic procedure. Available: triage_stuck_ros (find stuck/failed ROs), record_quality_audit (audit failure rates by state/org), market_health_report (correlate market SCS% with file failures), retry_effectiveness_analysis (compare first-pass vs retry), generate_pipeline_health_report (comprehensive operational report with summary stats, flagged ROs, bottlenecks, health metrics, market context, retry effectiveness, recommended actions, and charts).",
+                description="Run a named diagnostic procedure. Available: triage_stuck_ros, record_quality_audit, market_health_report, retry_effectiveness_analysis, generate_pipeline_health_report, trace_root_cause (trace low SCS → orgs/source/LOB), rejection_pattern_clustering (cluster by failure type + org/LOB).",
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
@@ -197,7 +197,7 @@ class SupervisorAgent:
         intent = entities.get("intent", "general")
 
         def tool_executor(tool_name, tool_args):
-            return self._execute_tool(tool_name, tool_args, session_id=session_id)
+            return self._execute_tool(tool_name, tool_args, session_id=session_id, entities=entities)
 
         if intent == "triage":
             agent_name = "pipeline_agent"
@@ -317,7 +317,7 @@ class SupervisorAgent:
         ro_ids = re.findall(r'RO-\d+', query)
 
         procedures = []
-        proc_names = ["triage_stuck_ros", "record_quality_audit", "market_health_report", "retry_effectiveness_analysis"]
+        proc_names = ["triage_stuck_ros", "record_quality_audit", "market_health_report", "retry_effectiveness_analysis", "trace_root_cause", "rejection_pattern_clustering"]
         for p in proc_names:
             if p.replace("_", " ") in query.lower() or p in query.lower():
                 procedures.append(p)
@@ -347,17 +347,47 @@ class SupervisorAgent:
             "intent": intent,
         }
 
-    def _execute_tool(self, tool_name: str, args: dict, session_id: str | None = None) -> dict:
+    def _route_web_search(self, query: str, entities: dict) -> dict:
+        """Route to specialized search helpers based on query and entities."""
+        q_lower = query.lower()
+        states = entities.get("states", [])
+        orgs = entities.get("orgs", [])
+
+        if states and any(kw in q_lower for kw in ["regulation", "regulatory", "compliance", "cms", "medicaid", "medicare", "rule", "policy"]):
+            state = states[0]
+            topic = "provider enrollment"
+            if "rejection" in q_lower or "failure" in q_lower:
+                topic = "roster rejection compliance"
+            return search_regulatory_context(state, topic)
+
+        if orgs and any(kw in q_lower for kw in ["org", "organization", "provider", "hospital", "medical"]):
+            return search_org_context(orgs[0])
+
+        if any(kw in q_lower for kw in ["validation failure", "complete validation", "rejection", "compliance requirement"]):
+            failure_type = "validation failure" if "validation" in q_lower else "rejection"
+            return search_compliance_context(failure_type)
+
+        if states and ("lob" in q_lower or "line of business" in q_lower or "medicaid" in q_lower or "medicare" in q_lower):
+            from tools.web_search import search_lob_requirements
+            lob = "Medicaid" if "medicaid" in q_lower else "Medicare" if "medicare" in q_lower else "provider roster"
+            return search_lob_requirements(lob, states[0])
+
+        return search(query, max_results=3)
+
+    def _execute_tool(self, tool_name: str, args: dict, session_id: str | None = None, entities: dict | None = None) -> dict:
         """Execute a tool call and return results."""
         try:
             if tool_name == "query_data":
                 return execute_sql(args.get("sql", ""))
 
             elif tool_name == "web_search":
-                return search(args.get("query", ""), max_results=3)
+                return self._route_web_search(args.get("query", ""), entities or {})
 
             elif tool_name == "run_procedure":
-                proc_name = args.get("procedure_name", "")
+                proc_name = args.get("procedure_name", "").strip()
+                # Alias common mis-calls (e.g. LLM says "days_stuck" for triage)
+                if proc_name.lower() in ("days_stuck", "stuck_ros", "triage"):
+                    proc_name = "triage_stuck_ros"
                 params = {}
                 if args.get("params"):
                     try:
@@ -498,18 +528,17 @@ class SupervisorAgent:
                            FILE_RECEIVED_DT, PRE_PROCESSING_HEALTH, MAPPING_APROVAL_HEALTH,
                            ISF_GEN_HEALTH, DART_GEN_HEALTH, DART_REVIEW_HEALTH,
                            DART_UI_VALIDATION_HEALTH, SPS_LOAD_HEALTH,
-                           DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days_stuck
-                    FROM roster WHERE IS_STUCK = 1 ORDER BY days_stuck DESC
+                           DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) AS DAYS_STUCK
+                    FROM roster WHERE IS_STUCK = 1 ORDER BY DAYS_STUCK DESC
                 """)
-                import pandas as pd
                 health_cols = ["PRE_PROCESSING_HEALTH", "MAPPING_APROVAL_HEALTH", "ISF_GEN_HEALTH",
                                "DART_GEN_HEALTH", "DART_REVIEW_HEALTH", "DART_UI_VALIDATION_HEALTH", "SPS_LOAD_HEALTH"]
                 if not df.empty:
-                    df["red_count"] = df[health_cols].apply(lambda r: sum(1 for v in r if v == "Red"), axis=1)
-                    df["priority"] = df.apply(
-                        lambda r: "critical" if r["days_stuck"] > 90 and r["red_count"] >= 2
-                        else "high" if r["days_stuck"] > 30 or r["red_count"] >= 2
-                        else "medium" if r["days_stuck"] > 7 else "low", axis=1
+                    df["RED_COUNT"] = df[health_cols].apply(lambda r: sum(1 for v in r if str(v).upper() == "RED"), axis=1)
+                    df["PRIORITY"] = df.apply(
+                        lambda r: "CRITICAL" if r["DAYS_STUCK"] > 90 and r["RED_COUNT"] >= 2
+                        else "HIGH" if r["DAYS_STUCK"] > 30 or r["RED_COUNT"] >= 2
+                        else "MEDIUM" if r["DAYS_STUCK"] > 7 else "LOW", axis=1
                     )
                 return {"chart": create_stuck_tracker(df)}
 
@@ -525,6 +554,7 @@ class SupervisorAgent:
                 "stuck_count": int(db_query("SELECT COUNT(*) as c FROM roster WHERE IS_STUCK=1").iloc[0]["c"]),
                 "failed_count": int(db_query("SELECT COUNT(*) as c FROM roster WHERE IS_FAILED=1").iloc[0]["c"]),
                 "stuck_by_state": {},
+                "stuck_ro_ids_by_state": {},
                 "failed_by_state": {},
                 "red_flag_by_state": {},
                 "scs_percent_by_state": {},
@@ -534,6 +564,18 @@ class SupervisorAgent:
             stuck_df = db_query("SELECT CNT_STATE, COUNT(*) as cnt FROM roster WHERE IS_STUCK=1 GROUP BY CNT_STATE")
             for _, r in stuck_df.iterrows():
                 snapshot["stuck_by_state"][r["CNT_STATE"]] = int(r["cnt"])
+
+            stuck_ros_df = db_query(
+                "SELECT RO_ID, CNT_STATE, LATEST_STAGE_NM FROM roster WHERE IS_STUCK=1"
+            )
+            for _, r in stuck_ros_df.iterrows():
+                state = r["CNT_STATE"]
+                if state not in snapshot["stuck_ro_ids_by_state"]:
+                    snapshot["stuck_ro_ids_by_state"][state] = []
+                snapshot["stuck_ro_ids_by_state"][state].append({
+                    "RO_ID": r["RO_ID"],
+                    "LATEST_STAGE_NM": r["LATEST_STAGE_NM"],
+                })
 
             failed_df = db_query("SELECT CNT_STATE, COUNT(*) as cnt FROM roster WHERE IS_FAILED=1 GROUP BY CNT_STATE")
             for _, r in failed_df.iterrows():
@@ -644,8 +686,8 @@ class SupervisorAgent:
             return f"{state}: top failing org changed from '{old}' → '{new}'"
         return f"{state}: {field} changed ({old} → {new})"
 
-    async def generate_proactive_alerts(self) -> list:
-        """Generate proactive monitoring alerts with intelligent trend detection."""
+    async def generate_proactive_alerts(self, scs_threshold: float = 95.0) -> list:
+        """Generate proactive monitoring alerts. scs_threshold: flag markets below this % (default 95)."""
         from data_loader import query as db_query
         alerts = []
 
@@ -667,10 +709,10 @@ class SupervisorAgent:
                 "details": stuck_details.to_dict(orient="records"),
             })
 
-        # ── 2. Markets below 95% SCS ──
-        low_markets = db_query("""
+        # ── 2. Markets below SCS threshold ──
+        low_markets = db_query(f"""
             SELECT MARKET, SCS_PERCENT, MONTH
-            FROM metrics WHERE SCS_PERCENT < 95
+            FROM metrics WHERE SCS_PERCENT < {float(scs_threshold)}
             ORDER BY SCS_PERCENT ASC
         """)
         if not low_markets.empty:
@@ -678,7 +720,7 @@ class SupervisorAgent:
             alerts.append({
                 "type": "low_scs",
                 "severity": "medium",
-                "message": f"{len(low_markets)} market-month entries below 95% SCS (worst: {worst['MARKET']} at {worst['SCS_PERCENT']}%)",
+                "message": f"{len(low_markets)} market-month entries below {scs_threshold}% SCS (worst: {worst['MARKET']} at {worst['SCS_PERCENT']}%)",
                 "recommended_action": "market_health_report",
                 "recommended_params": {"market": str(worst["MARKET"])},
                 "details": low_markets.head(10).to_dict(orient="records"),

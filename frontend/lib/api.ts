@@ -114,8 +114,11 @@ export async function getDashboardOverview() {
   return res.json();
 }
 
-export async function getAlerts(): Promise<{ alerts: Alert[] }> {
-  const res = await fetch(`${API_BASE}/dashboard/alerts`);
+export async function getAlerts(scsThreshold?: number): Promise<{ alerts: Alert[] }> {
+  const url = scsThreshold != null
+    ? `${API_BASE}/alerts?scs_threshold=${scsThreshold}`
+    : `${API_BASE}/dashboard/alerts`;
+  const res = await fetch(url);
   return res.json();
 }
 
@@ -194,5 +197,25 @@ export async function runProcedure(name: string, params: Record<string, unknown>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ params }),
   });
+  return res.json();
+}
+
+export interface CreateProcedurePayload {
+  name: string;
+  description: string;
+  steps: { action: string; sql: string; description: string }[];
+  parameters?: Record<string, { type: string; default?: unknown }>;
+}
+
+export async function createProcedure(payload: CreateProcedurePayload) {
+  const res = await fetch(`${API_BASE}/memory/procedural`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || res.statusText);
+  }
   return res.json();
 }

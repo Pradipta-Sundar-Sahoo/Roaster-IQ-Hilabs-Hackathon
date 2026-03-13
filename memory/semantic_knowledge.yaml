@@ -176,6 +176,29 @@ modification_history:
   reason: Web search for regulatory context on NATIONAL market processing patterns.
   session_id: null
   timestamp: '2026-03-13T19:05:41.172771'
+- category: regulatory
+  key: Arizona Medicaid 2025 Policy Changes
+  new_value: Significant changes in Arizona's Medicaid system in 2025, including work
+    requirements, increased eligibility determinations, and policy shifts for Home
+    and Community Based Services (HCBS), likely caused a 0.0% retry lift for Medicaid
+    rosters. These changes introduced new data verification and compliance requirements,
+    rendering simple reprocessing ineffective without adapting to the updated regulations.
+  old_value: null
+  reason: Web search findings explaining 0.0% retry lift in Arizona Medicaid rosters.
+  session_id: null
+  timestamp: '2026-03-13T19:39:30.333883'
+- category: regulatory
+  key: CMS CY 2026 Policy Changes
+  new_value: CMS released a final rule on April 4, 2025, for Contract Year 2026 Policy
+    and Technical Changes to Medicare Advantage, Prescription Drug Benefit, Medicare
+    Cost Plan, and PACE programs (CMS-4208). Changes include new Medicare enrollment
+    revocations, stricter DMEPOS accreditation, annual surveys, and prior authorization
+    "gold" standards. Specific provider roster validation requirement changes were
+    not detailed in the search results.
+  old_value: null
+  reason: CMS regulatory update found via web search
+  session_id: null
+  timestamp: '2026-03-13T19:52:06.245402'
 pipeline_stages:
 - description: File received from source system, initial format validation and checksum
     verification
@@ -226,6 +249,18 @@ pipeline_stages:
   name: SPS_LOAD
   next_stage: RESOLVED
 regulatory:
+  Arizona Medicaid 2025 Policy Changes: Significant changes in Arizona's Medicaid
+    system in 2025, including work requirements, increased eligibility determinations,
+    and policy shifts for Home and Community Based Services (HCBS), likely caused
+    a 0.0% retry lift for Medicaid rosters. These changes introduced new data verification
+    and compliance requirements, rendering simple reprocessing ineffective without
+    adapting to the updated regulations.
+  CMS CY 2026 Policy Changes: CMS released a final rule on April 4, 2025, for Contract
+    Year 2026 Policy and Technical Changes to Medicare Advantage, Prescription Drug
+    Benefit, Medicare Cost Plan, and PACE programs (CMS-4208). Changes include new
+    Medicare enrollment revocations, stricter DMEPOS accreditation, annual surveys,
+    and prior authorization "gold" standards. Specific provider roster validation
+    requirement changes were not detailed in the search results.
   CMS Provider Directory Accuracy 2026: CMS is increasing oversight and enforcement
     of provider directory accuracy, with a focus on complete, accurate, and timely
     data across Medicare Fee-for-Service, Medicare Advantage, Medicaid, and CHIP.

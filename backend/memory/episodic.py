@@ -423,6 +423,17 @@ class EpisodicMemory:
             stuck_df = db_query("SELECT CNT_STATE, COUNT(*) as cnt FROM roster WHERE IS_STUCK=1 GROUP BY CNT_STATE")
             current["stuck_by_state"] = {r["CNT_STATE"]: int(r["cnt"]) for _, r in stuck_df.iterrows()}
 
+            stuck_ros_df = db_query("SELECT RO_ID, CNT_STATE, LATEST_STAGE_NM FROM roster WHERE IS_STUCK=1")
+            current["stuck_ro_ids_by_state"] = {}
+            for _, r in stuck_ros_df.iterrows():
+                state = r["CNT_STATE"]
+                if state not in current["stuck_ro_ids_by_state"]:
+                    current["stuck_ro_ids_by_state"][state] = []
+                current["stuck_ro_ids_by_state"][state].append({
+                    "RO_ID": r["RO_ID"],
+                    "LATEST_STAGE_NM": r["LATEST_STAGE_NM"],
+                })
+
             scs_df = db_query(
                 "SELECT MARKET, SCS_PERCENT FROM metrics WHERE (MARKET, MONTH) IN "
                 "(SELECT MARKET, MAX(MONTH) FROM metrics GROUP BY MARKET)"
@@ -452,19 +463,35 @@ class EpisodicMemory:
         lines = [f"**Welcome back!** Since {time_label}:"]
         any_change = False
 
-        # Compare stuck ROs per state
+        # Compare stuck ROs per state (counts)
         prev_stuck = prev_snapshot.get("stuck_by_state", {})
         curr_stuck = current.get("stuck_by_state", {})
+        prev_ro_ids = prev_snapshot.get("stuck_ro_ids_by_state", {})
+        curr_ro_ids = current.get("stuck_ro_ids_by_state", {})
+
         all_states = sorted(set(list(prev_stuck.keys()) + list(curr_stuck.keys())))
         for state in all_states:
             old_val = prev_stuck.get(state, 0)
             new_val = curr_stuck.get(state, 0)
-            if old_val != new_val:
+            prev_ids = {r["RO_ID"] for r in prev_ro_ids.get(state, [])}
+            curr_ids = {r["RO_ID"] for r in curr_ro_ids.get(state, [])}
+            resolved = prev_ids - curr_ids
+            still_stuck = prev_ids & curr_ids
+            newly_stuck = curr_ids - prev_ids
+
+            if old_val != new_val or (prev_ids and (resolved or still_stuck)) or newly_stuck:
                 any_change = True
-                if new_val < old_val:
-                    lines.append(f"- **{state}**: stuck ROs resolved ({old_val} → {new_val}) ✅")
-                else:
-                    lines.append(f"- **{state}**: stuck ROs increased ({old_val} → {new_val}) ⚠️")
+                if prev_ids and new_val < old_val and resolved:
+                    narrative = f"- **{state}**: {len(resolved)} stuck RO(s) resolved, {len(still_stuck)} still stuck"
+                    narrative += " ✅"
+                    lines.append(narrative)
+                elif prev_ids and new_val > old_val and newly_stuck:
+                    lines.append(f"- **{state}**: stuck ROs increased ({old_val} → {new_val}); {len(newly_stuck)} newly stuck ⚠️")
+                elif old_val != new_val:
+                    if new_val < old_val:
+                        lines.append(f"- **{state}**: stuck ROs resolved ({old_val} → {new_val}) ✅")
+                    else:
+                        lines.append(f"- **{state}**: stuck ROs increased ({old_val} → {new_val}) ⚠️")
 
         # Compare SCS_PERCENT (flag > 1% change)
         prev_scs = prev_snapshot.get("scs_percent_by_state", {})

@@ -42,6 +42,27 @@ class ProceduralMemory:
     def get_procedure_names(self) -> list[str]:
         return list(self.procedures.keys())
 
+    def create_procedure(self, name: str, description: str, steps: list[dict], parameters: dict = None) -> dict:
+        """Create a new custom procedure. Name must be unique, snake_case."""
+        safe_name = name.strip().lower().replace(" ", "_").replace("-", "_")
+        if not safe_name:
+            raise ValueError("Procedure name cannot be empty")
+        if safe_name in self.procedures:
+            raise ValueError(f"Procedure '{safe_name}' already exists")
+
+        self.procedures[safe_name] = {
+            "name": safe_name,
+            "version": 1,
+            "description": description.strip(),
+            "steps": steps or [],
+            "parameters": parameters or {},
+            "last_modified": datetime.now().isoformat(),
+            "modification_history": [],
+            "execution_log": [],
+        }
+        self._save()
+        return {"procedure": safe_name, "version": 1}
+
     def update_procedure(self, name: str, updates: dict) -> dict:
         """Update a procedure's steps or parameters. Tracks version history."""
         if name not in self.procedures:

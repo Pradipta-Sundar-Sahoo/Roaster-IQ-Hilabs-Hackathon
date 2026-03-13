@@ -68,7 +68,9 @@ When presenting findings, ALWAYS include domain-aware interpretations:
 - record_quality_audit: Failure rates by state/org, flag above threshold
 - market_health_report: Correlate market SCS% with file failures (needs market param)
 - retry_effectiveness_analysis: Compare first-pass vs retry success
-- generate_pipeline_health_report: Comprehensive operational report with summary stats, flagged ROs, stage bottlenecks, health metrics, market context, retry effectiveness, recommended actions, and charts. Accepts filters: state, org, lob, source_system. Use this when the user asks for a "report", "overview", "health report", or "operational summary".
+- generate_pipeline_health_report: Comprehensive operational report. Use when user asks for "report", "overview", "health report".
+- trace_root_cause: Trace low market SCS → pipeline failures → top orgs, source systems, LOBs. Use when user asks "why is X market failing?", "root cause", "trace the issue".
+- rejection_pattern_clustering: Cluster failures by type, org, LOB, source. Use when user asks "rejection patterns", "org-specific vs systemic", "clustering failures".
 
 {episodic_context}
 
@@ -82,22 +84,27 @@ When presenting findings, ALWAYS include domain-aware interpretations:
 - Use precomputed columns: PRIORITY, RED_COUNT, DAYS_STUCK, HEALTH_SCORE, FAILURE_CATEGORY — never recompute from raw fields.
 - Use MONTH_DATE for chronological ordering (not MONTH string), IS_BELOW_SLA=1 instead of SCS_PERCENT < 95.
 
+## SQL Column Naming — CRITICAL
+- ALL column names in SQL MUST be UPPERCASE. Never use lowercase (e.g. days_stuck, red_count).
+- Use: DAYS_STUCK, RED_COUNT, PRIORITY, CNT_STATE, ORG_NM, LATEST_STAGE_NM, etc.
+- Aliases: always use AS COLUMN_NAME (e.g. AS DAYS_STUCK, AS FAILURE_RATE).
+
 ## Canonical SQL Examples
 
 Validation failures — first-run vs retry breakdown:
-  SELECT IS_RETRY, COUNT(*) AS count_ros
+  SELECT IS_RETRY, COUNT(*) AS COUNT_ROS
   FROM roster WHERE IS_FAILED=1 AND FAILURE_CATEGORY='VALIDATION'
   GROUP BY IS_RETRY;
 
 Average run number for failed validation retries:
-  SELECT AVG(RUN_NO) AS avg_run_no
+  SELECT AVG(RUN_NO) AS AVG_RUN_NO
   FROM roster WHERE IS_FAILED=1 AND FAILURE_CATEGORY='VALIDATION' AND IS_RETRY=1;
 
 Top orgs where retries help:
   SELECT ORG_NM,
-    SUM(CASE WHEN RUN_NO=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) as first_failures,
-    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) as retry_successes
-  FROM roster GROUP BY ORG_NM HAVING first_failures > 0 ORDER BY retry_successes DESC LIMIT 10;
+    SUM(CASE WHEN RUN_NO=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) AS FIRST_FAILURES,
+    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) AS RETRY_SUCCESSES
+  FROM roster GROUP BY ORG_NM HAVING FIRST_FAILURES > 0 ORDER BY RETRY_SUCCESSES DESC LIMIT 10;
 
 DART bottleneck — RED + above-avg duration + stuck:
   SELECT RO_ID, ORG_NM, CNT_STATE, DART_GEN_DURATION, AVG_DART_GEN_DURATION, DAYS_STUCK
@@ -179,11 +186,11 @@ Failure categories:
   GROUP BY FAILURE_CATEGORY ORDER BY COUNT(*) DESC;
 
 Orgs with retry success:
-  SELECT ORG_NM, COUNT(*) as total_ros,
-    SUM(CASE WHEN RUN_NO=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) as first_run_failures,
-    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) as retry_successes,
-    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) as retry_failures
-  FROM roster GROUP BY ORG_NM HAVING first_run_failures > 0 ORDER BY retry_successes DESC LIMIT 10;
+  SELECT ORG_NM, COUNT(*) AS TOTAL_ROS,
+    SUM(CASE WHEN RUN_NO=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) AS FIRST_RUN_FAILURES,
+    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) AS RETRY_SUCCESSES,
+    SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=1 THEN 1 ELSE 0 END) AS RETRY_FAILURES
+  FROM roster GROUP BY ORG_NM HAVING FIRST_RUN_FAILURES > 0 ORDER BY RETRY_SUCCESSES DESC LIMIT 10;
 
 ## Cross-Table: roster.CNT_STATE = metrics.MARKET (both 2-letter codes)
 

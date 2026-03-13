@@ -253,9 +253,13 @@ def create_retry_lift(df: pd.DataFrame) -> dict:
 
 
 def create_stuck_tracker(df: pd.DataFrame) -> dict:
-    """Stuck RO tracker — ROs plotted by days stuck, colored by priority."""
+    """Stuck RO tracker — ROs plotted by DAYS_STUCK, colored by PRIORITY. Uses UPPERCASE column names."""
     if df.empty:
         return None
+
+    days_col = "DAYS_STUCK" if "DAYS_STUCK" in df.columns else "days_stuck"
+    red_col = "RED_COUNT" if "RED_COUNT" in df.columns else "red_count"
+    pri_col = "PRIORITY" if "PRIORITY" in df.columns else "priority"
 
     priority_colors = {
         "CRITICAL": "#e74c3c",
@@ -267,21 +271,20 @@ def create_stuck_tracker(df: pd.DataFrame) -> dict:
     fig = go.Figure()
 
     for priority, color in priority_colors.items():
-        col = "PRIORITY" if "PRIORITY" in df.columns else "priority"
-        p_data = df[df[col] == priority] if col in df.columns else pd.DataFrame()
+        p_data = df[df[pri_col] == priority] if pri_col in df.columns else pd.DataFrame()
         if not p_data.empty:
             fig.add_trace(go.Scatter(
                 x=p_data["ORG_NM"].apply(lambda x: x[:30] + "..." if len(str(x)) > 30 else x),
-                y=p_data["days_stuck"],
+                y=p_data[days_col],
                 mode="markers",
                 name=f"{priority.title()} Priority",
                 marker=dict(
-                    size=p_data.get("red_count", pd.Series([5]*len(p_data))) * 5 + 8,
+                    size=p_data.get(red_col, pd.Series([5]*len(p_data))) * 5 + 8,
                     color=color,
                     line=dict(width=1, color="black"),
                 ),
                 text=p_data.apply(
-                    lambda r: f"RO: {r['RO_ID']}<br>State: {r['CNT_STATE']}<br>Stage: {r['LATEST_STAGE_NM']}<br>Days: {r['days_stuck']}<br>Red Flags: {r.get('red_count', 'N/A')}",
+                    lambda r, dc=days_col, rc=red_col: f"RO: {r['RO_ID']}<br>State: {r['CNT_STATE']}<br>Stage: {r['LATEST_STAGE_NM']}<br>Days: {r.get(dc, 'N/A')}<br>Red Flags: {r.get(rc, 'N/A')}",
                     axis=1,
                 ),
                 hovertemplate="%{text}<extra></extra>",

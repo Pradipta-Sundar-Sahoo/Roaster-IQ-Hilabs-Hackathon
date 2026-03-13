@@ -3,11 +3,10 @@
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { sendChat, getSessionBriefing, type ChatResponse, type ToolCall } from "@/lib/api";
+import { sendChat, getSessionBriefing, getProceduralMemory, createProcedure, type ChatResponse, type ToolCall } from "@/lib/api";
 import { PlotlyChart } from "@/components/charts/PlotlyChart";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Send,
   AlertTriangle,
@@ -23,6 +22,8 @@ import {
   Database,
   Terminal,
   Table2,
+  Plus,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -94,6 +95,16 @@ const SUGGESTED_QUERIES = [
     hover: "hover:shadow-indigo-200/50",
     text: "Why does Tennessee have a low success rate? Trace the root cause",
   },
+];
+
+const BUILTIN_PROCEDURES: { cmd: string; name: string; trigger: string; paramHint?: string }[] = [
+  { cmd: "triage", name: "triage_stuck_ros", trigger: "Run triage_stuck_ros for stuck and critical ROs", paramHint: "" },
+  { cmd: "audit", name: "record_quality_audit", trigger: "Run record_quality_audit", paramHint: " for TN" },
+  { cmd: "market", name: "market_health_report", trigger: "Run market_health_report", paramHint: " for NY" },
+  { cmd: "retry", name: "retry_effectiveness_analysis", trigger: "Analyze retry effectiveness", paramHint: "" },
+  { cmd: "report", name: "generate_pipeline_health_report", trigger: "Generate pipeline health report", paramHint: " for TN" },
+  { cmd: "rootcause", name: "trace_root_cause", trigger: "Trace root cause for worst-performing market", paramHint: " or for NY" },
+  { cmd: "clustering", name: "rejection_pattern_clustering", trigger: "Run rejection pattern clustering", paramHint: "" },
 ];
 
 const TOOL_LABELS: Record<string, { label: string; color: string }> = {
@@ -267,6 +278,118 @@ function ToolCallsSection({ toolCalls }: { toolCalls: ToolCall[] }) {
   );
 }
 
+function CreateProcedureModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [sql, setSql] = useState("SELECT * FROM roster WHERE IS_STUCK = 1 LIMIT 10");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!name.trim()) {
+      setError("Name is required");
+      return;
+    }
+    if (!sql.trim()) {
+      setError("SQL query is required");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      await createProcedure({
+        name: name.trim(),
+        description: description.trim() || `Custom procedure: ${name.trim()}`,
+        steps: [{ action: "query", sql: sql.trim(), description: "Custom query" }],
+      });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="w-full max-w-lg rounded-2xl border border-border/60 bg-card shadow-2xl p-6 mx-4"
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-foreground">Create custom procedure</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-lg hover:bg-muted/50 transition-colors cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my_custom_procedure"
+              className="w-full px-4 py-2.5 rounded-xl border border-border/60 bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+            <p className="text-xs text-muted-foreground mt-1">Use snake_case (e.g. failed_ros_by_state)</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">Description</label>
+            <input
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What does this procedure do?"
+              className="w-full px-4 py-2.5 rounded-xl border border-border/60 bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">SQL query</label>
+            <textarea
+              value={sql}
+              onChange={(e) => setSql(e.target.value)}
+              placeholder="SELECT ... FROM roster ..."
+              rows={6}
+              className="w-full px-4 py-2.5 rounded-xl border border-border/60 bg-background text-foreground text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none"
+            />
+            <p className="text-xs text-muted-foreground mt-1">Use UPPERCASE column names. Params: {"{state}"}, {"{market}"}</p>
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <div className="flex gap-3 mt-6">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 px-4 py-2.5 rounded-xl border border-border/60 hover:bg-muted/50 transition-colors text-sm font-medium cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={loading}
+            className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white font-medium text-sm hover:opacity-90 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            {loading ? "Creating..." : "Create"}
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
 function ChatPageInner() {
   const searchParams = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -274,7 +397,38 @@ function ChatPageInner() {
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>("");
   const [prefillHandled, setPrefillHandled] = useState(false);
+  const [showScrollDown, setShowScrollDown] = useState(false);
+  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
+  const [customProcedures, setCustomProcedures] = useState<{ cmd: string; name: string; trigger: string; paramHint?: string }[]>([]);
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  const procedureSlashCommands = [
+    ...BUILTIN_PROCEDURES,
+    ...customProcedures,
+    { cmd: "create", name: "Create custom procedure", trigger: "__CREATE__", paramHint: "" },
+  ];
+
+  const showSlashPalette = input.startsWith("/");
+  const slashQuery = input.slice(1).toLowerCase();
+  const filteredProcedures = procedureSlashCommands.filter(
+    (p) => !slashQuery || p.cmd.startsWith(slashQuery) || p.name.toLowerCase().includes(slashQuery)
+  );
+  const selectedProcedure = filteredProcedures[selectedSlashIndex] ?? filteredProcedures[0];
+
+  const scrollToBottom = () => {
+    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+    setShowScrollDown(false);
+  };
+
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el || messages.length === 0) return;
+    const { scrollTop, clientHeight, scrollHeight } = el;
+    const isNearBottom = scrollTop + clientHeight >= scrollHeight - 80;
+    setShowScrollDown(!isNearBottom);
+  };
 
   useEffect(() => {
     const id = crypto.randomUUID();
@@ -289,6 +443,28 @@ function ChatPageInner() {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (showSlashPalette) setSelectedSlashIndex(0);
+  }, [slashQuery, showSlashPalette]);
+
+  useEffect(() => {
+    getProceduralMemory().then((data) => {
+      if (data && typeof data === "object") {
+        const procs = data as Record<string, { name: string; description?: string }>;
+        const builtinNames = new Set(BUILTIN_PROCEDURES.map((p) => p.name));
+        const custom = Object.keys(procs)
+          .filter((k) => !builtinNames.has(k))
+          .map((k) => ({
+            cmd: k.replace(/_/g, "").slice(0, 12),
+            name: k,
+            trigger: `Run ${k}`,
+            paramHint: "",
+          }));
+        setCustomProcedures(custom);
+      }
+    }).catch(() => {});
+  }, [showCreateModal]);
 
   useEffect(() => {
     if (prefillHandled || !sessionId) return;
@@ -354,7 +530,11 @@ function ChatPageInner() {
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1 px-6 md:px-8 py-6">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-6 md:px-8 py-6"
+      >
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-12">
             <motion.div
@@ -544,20 +724,103 @@ function ChatPageInner() {
             <div ref={scrollRef} />
           </div>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Input — glass effect + gradient send */}
-      <div className="shrink-0 px-6 md:px-8 py-6 bg-card/40 backdrop-blur-xl border-t border-border/50">
+      <div className="shrink-0 relative px-6 md:px-8 py-6 bg-card/40 backdrop-blur-xl border-t border-border/50">
+        <AnimatePresence>
+          {showScrollDown && messages.length > 0 && (
+            <motion.button
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              onClick={scrollToBottom}
+              className="absolute left-1/2 -translate-x-1/2 bottom-full mb-3 px-4 py-2 rounded-xl bg-card/90 backdrop-blur-sm border border-border/60 shadow-lg hover:bg-card transition-colors flex items-center gap-2 text-sm font-medium text-foreground cursor-pointer z-10"
+            >
+              <ChevronDown className="w-4 h-4" />
+              Go to bottom
+            </motion.button>
+          )}
+        </AnimatePresence>
         <div className="max-w-4xl mx-auto flex gap-4">
           <div className="flex-1 relative">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder="Ask about pipeline health, market metrics, stuck ROs..."
+              onKeyDown={(e) => {
+                if (showSlashPalette) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSelectedSlashIndex((i) => Math.min(i + 1, filteredProcedures.length - 1));
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSelectedSlashIndex((i) => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === "Enter" && selectedProcedure) {
+                    e.preventDefault();
+                    if (selectedProcedure.trigger === "__CREATE__") {
+                      setShowCreateModal(true);
+                      setInput("");
+                    } else {
+                      setInput(selectedProcedure.trigger + (selectedProcedure.paramHint ?? ""));
+                    }
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    setInput("");
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !e.shiftKey) handleSend();
+              }}
+              placeholder="Ask about pipeline health... or type / for procedures"
               className="w-full px-6 py-4 rounded-2xl border-2 border-border/60 bg-background/80 backdrop-blur-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/20 text-sm transition-all duration-200 shadow-sm"
               disabled={loading}
             />
+            <AnimatePresence>
+              {showSlashPalette && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  className="absolute bottom-full left-0 right-0 mb-2 rounded-xl border border-border/60 bg-card/95 backdrop-blur-xl shadow-xl overflow-hidden z-20"
+                >
+                  <div className="px-3 py-2 border-b border-border/50 text-xs font-medium text-muted-foreground">
+                    Procedures — select one to run
+                  </div>
+                  <div className="max-h-64 overflow-y-auto py-1">
+                    {filteredProcedures.length === 0 ? (
+                      <div className="px-4 py-3 text-sm text-muted-foreground">No matching procedure</div>
+                    ) : (
+                      filteredProcedures.map((p, i) => (
+                        <button
+                          key={p.name}
+                          type="button"
+                          onClick={() => {
+                            if (p.trigger === "__CREATE__") {
+                              setShowCreateModal(true);
+                              setInput("");
+                            } else {
+                              setInput(p.trigger + (p.paramHint ?? ""));
+                            }
+                          }}
+                          onMouseEnter={() => setSelectedSlashIndex(i)}
+                          className={`w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors cursor-pointer ${
+                            i === selectedSlashIndex ? "bg-primary/10 text-primary" : "hover:bg-muted/50"
+                          }`}
+                        >
+                          <span className="text-xs font-mono text-muted-foreground">/{p.cmd}</span>
+                          <span className="text-sm font-medium">{p.name.replace(/_/g, " ")}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
           <motion.button
             onClick={() => handleSend()}
@@ -571,6 +834,24 @@ function ChatPageInner() {
           </motion.button>
         </div>
       </div>
+
+      <AnimatePresence>
+        {showCreateModal && (
+          <CreateProcedureModal
+            onClose={() => setShowCreateModal(false)}
+            onCreated={() => getProceduralMemory().then((data) => {
+              if (data && typeof data === "object") {
+                const procs = data as Record<string, unknown>;
+                const builtinNames = new Set(BUILTIN_PROCEDURES.map((p) => p.name));
+                const custom = Object.keys(procs)
+                  .filter((k) => !builtinNames.has(k))
+                  .map((k) => ({ cmd: k.replace(/_/g, "").slice(0, 12), name: k, trigger: `Run ${k}`, paramHint: "" }));
+                setCustomProcedures(custom);
+              }
+            })}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

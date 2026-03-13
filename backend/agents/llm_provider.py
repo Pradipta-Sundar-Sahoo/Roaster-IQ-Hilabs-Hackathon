@@ -13,7 +13,7 @@ OPENROUTER_TOOLS = [
         "type": "function",
         "function": {
             "name": "query_data",
-            "description": "Execute a SQL query (DuckDB). Use EXACT column names from the schema — do NOT expand abbreviations. CRITICAL: CNT_STATE/MARKET=2-letter codes, IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1 not =TRUE), no 'status' column (use IS_FAILED=1), no 'attempt_number' (use RUN_NO), 'table' is reserved.",
+            "description": "Execute a SQL query (DuckDB). ALL column names and aliases MUST be UPPERCASE (DAYS_STUCK, RED_COUNT, PRIORITY, etc.). Use EXACT column names from schema. CNT_STATE/MARKET=2-letter codes. IS_FAILED/IS_STUCK/IS_RETRY are INTEGER (=1). No 'status' (use IS_FAILED=1), no 'attempt_number' (use RUN_NO).",
             "parameters": {
                 "type": "object",
                 "properties": {

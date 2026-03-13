@@ -7,7 +7,7 @@
       {
         "action": "query",
         "description": "Find all stuck ROs",
-        "sql": "SELECT *, DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days_stuck FROM roster WHERE IS_STUCK = 1 ORDER BY days_stuck DESC"
+        "sql": "SELECT *, DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) AS DAYS_STUCK FROM roster WHERE IS_STUCK = 1 ORDER BY DAYS_STUCK DESC"
       },
       {
         "action": "compute",
@@ -27,9 +27,9 @@
         "action": "classify",
         "description": "Assign priority based on days stuck and Red flags",
         "rules": {
-          "critical": "days_stuck > 90 AND red_count >= 2",
-          "high": "days_stuck > 30 OR red_count >= 2",
-          "medium": "days_stuck > 7",
+          "critical": "DAYS_STUCK > 90 AND RED_COUNT >= 2",
+          "high": "DAYS_STUCK > 30 OR RED_COUNT >= 2",
+          "medium": "DAYS_STUCK > 7",
           "low": "otherwise"
         }
       },
@@ -58,7 +58,26 @@
     },
     "last_modified": "2026-03-13T10:00:00",
     "modification_history": [],
-    "execution_log": []
+    "execution_log": [
+      {
+        "timestamp": "2026-03-13T19:30:50.220267",
+        "params": {},
+        "outcome": "unresolved",
+        "session_id": "7b37c32c-7aeb-41cc-a1b1-812aa9d8caa6"
+      },
+      {
+        "timestamp": "2026-03-13T19:34:54.908546",
+        "params": {},
+        "outcome": "unresolved",
+        "session_id": "7b37c32c-7aeb-41cc-a1b1-812aa9d8caa6"
+      },
+      {
+        "timestamp": "2026-03-13T19:49:45.016931",
+        "params": {},
+        "outcome": "unresolved",
+        "session_id": "e5431c51-3c6d-432d-b04b-28a9a2be265b"
+      }
+    ]
   },
   "record_quality_audit": {
     "name": "record_quality_audit",
@@ -214,7 +233,32 @@
     },
     "last_modified": "2026-03-13T10:00:00",
     "modification_history": [],
-    "execution_log": []
+    "execution_log": [
+      {
+        "timestamp": "2026-03-13T19:53:34.643738",
+        "params": {
+          "market": "NY"
+        },
+        "outcome": "informational",
+        "session_id": "e5431c51-3c6d-432d-b04b-28a9a2be265b"
+      },
+      {
+        "timestamp": "2026-03-13T19:54:34.848785",
+        "params": {
+          "market": "NH"
+        },
+        "outcome": "informational",
+        "session_id": "a961f519-551d-43a1-b35e-f401849235f2"
+      },
+      {
+        "timestamp": "2026-03-13T19:55:13.473659",
+        "params": {
+          "market": "SC"
+        },
+        "outcome": "informational",
+        "session_id": "a961f519-551d-43a1-b35e-f401849235f2"
+      }
+    ]
   },
   "retry_effectiveness_analysis": {
     "name": "retry_effectiveness_analysis",
@@ -307,6 +351,12 @@
         },
         "outcome": "informational",
         "session_id": "ab1d0eb7-b1a8-4d75-a7ab-755fbd7442dc"
+      },
+      {
+        "timestamp": "2026-03-13T19:39:11.076693",
+        "params": {},
+        "outcome": "informational",
+        "session_id": "7b37c32c-7aeb-41cc-a1b1-812aa9d8caa6"
       }
     ]
   },
@@ -386,5 +436,40 @@
         "session_id": "6d666f05-662c-43d5-959c-6ad347a22498"
       }
     ]
+  },
+  "trace_root_cause": {
+    "name": "trace_root_cause",
+    "version": 1,
+    "description": "Trace root cause: low market SCS_PERCENT \u2192 pipeline failures \u2192 top orgs, source systems, LOBs. Builds full causal chain with evidence.",
+    "steps": [],
+    "parameters": {
+      "market": {
+        "type": "string",
+        "default": null,
+        "description": "Market/state to trace (e.g. NY, TN). If omitted, uses worst-performing market."
+      }
+    },
+    "last_modified": "2026-03-13T20:00:00",
+    "modification_history": [],
+    "execution_log": [
+      {
+        "timestamp": "2026-03-13T19:58:20.338278",
+        "params": {
+          "state": "NY"
+        },
+        "outcome": "informational",
+        "session_id": "a961f519-551d-43a1-b35e-f401849235f2"
+      }
+    ]
+  },
+  "rejection_pattern_clustering": {
+    "name": "rejection_pattern_clustering",
+    "version": 1,
+    "description": "Cluster rejection patterns by FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, LOB, SRC_SYS. Identifies org-specific, LOB-specific, or source-system-wide issues.",
+    "steps": [],
+    "parameters": {},
+    "last_modified": "2026-03-13T20:00:00",
+    "modification_history": [],
+    "execution_log": []
   }
 }

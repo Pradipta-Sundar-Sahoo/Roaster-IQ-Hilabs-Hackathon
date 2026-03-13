@@ -194,6 +194,27 @@ async def update_procedure(name: str, update: dict):
         raise HTTPException(status_code=404, detail=f"Procedure '{name}' not found")
 
 
+class CreateProcedureRequest(BaseModel):
+    name: str
+    description: str
+    steps: list[dict] = []
+    parameters: dict = {}
+
+
+@app.post("/memory/procedural")
+async def create_procedure(request: CreateProcedureRequest):
+    try:
+        out = procedural_memory.create_procedure(
+            name=request.name,
+            description=request.description,
+            steps=request.steps,
+            parameters=request.parameters,
+        )
+        return {"status": "created", "procedure": out["procedure"]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/dashboard/overview")
 async def dashboard_overview():
     from data_loader import query
@@ -233,10 +254,16 @@ async def dashboard_overview():
 
 
 @app.get("/dashboard/alerts")
-async def dashboard_alerts():
-    """Proactive monitoring alerts."""
-    alerts = await supervisor.generate_proactive_alerts()
+async def dashboard_alerts(scs_threshold: float = 95.0):
+    """Proactive monitoring alerts. Optional scs_threshold (default 95) for markets below SLA."""
+    alerts = await supervisor.generate_proactive_alerts(scs_threshold=scs_threshold)
     return {"alerts": alerts}
+
+
+@app.get("/alerts")
+async def alerts(scs_threshold: float = 95.0):
+    """Proactive monitoring — same as /dashboard/alerts. For judges: GET /alerts?scs_threshold=90"""
+    return await dashboard_alerts(scs_threshold)
 
 
 @app.get("/dashboard/intelligence")

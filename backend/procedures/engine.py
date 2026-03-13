@@ -23,6 +23,8 @@ HEALTH_COLUMNS = [
 ]
 
 
+
+
 def execute_procedure(procedure: dict, params: dict = None) -> dict:
     """Execute a procedure by name and return structured results."""
     name = procedure["name"]
@@ -34,12 +36,17 @@ def execute_procedure(procedure: dict, params: dict = None) -> dict:
         "market_health_report": _execute_market_report,
         "retry_effectiveness_analysis": _execute_retry_analysis,
         "generate_pipeline_health_report": _execute_pipeline_health_report,
+        "trace_root_cause": _execute_root_cause,
+        "rejection_pattern_clustering": _execute_rejection_clustering,
     }
 
-    if name not in executors:
-        return {"error": f"No executor for procedure '{name}'"}
+    if name in executors:
+        result = executors[name](procedure, params)
+    else:
+        result = _execute_custom_procedure(procedure, params)
 
-    result = executors[name](procedure, params)
+    if "error" in result:
+        return result
     result["procedure_version"] = procedure.get("version", 1)
 
     # Execute any custom query steps added by the user
@@ -48,6 +55,44 @@ def execute_procedure(procedure: dict, params: dict = None) -> dict:
         result["custom_step_results"] = custom_results
 
     return result
+
+
+def _execute_custom_procedure(procedure: dict, params: dict) -> dict:
+    """Execute a custom procedure by running its query steps."""
+    steps = procedure.get("steps", [])
+    results = []
+    for i, step in enumerate(steps):
+        if step.get("action") != "query":
+            continue
+        sql = step.get("sql", "")
+        if not sql.strip():
+            continue
+        for key, val in params.items():
+            sql = sql.replace(f"{{{key}}}", str(val))
+        try:
+            df = query(sql)
+            results.append({
+                "step_index": i,
+                "description": step.get("description", f"Step {i + 1}"),
+                "data": df.to_dict(orient="records"),
+                "row_count": len(df),
+            })
+        except Exception as e:
+            results.append({
+                "step_index": i,
+                "description": step.get("description", f"Step {i + 1}"),
+                "error": str(e),
+            })
+
+    summary_parts = [f"Step {r['step_index']+1}: {r.get('row_count', 'error')} rows" for r in results if "row_count" in r]
+    summary = "; ".join(summary_parts) if summary_parts else "No query steps executed"
+
+    return {
+        "procedure": procedure["name"],
+        "custom": True,
+        "step_results": results,
+        "summary": summary,
+    }
 
 
 def _run_custom_steps(procedure: dict, params: dict) -> list:
@@ -121,13 +166,23 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
                FILE_RECEIVED_DT, FILE_STATUS_CD, IS_FAILED, FAILURE_STATUS,
                PRE_PROCESSING_HEALTH, MAPPING_APROVAL_HEALTH, ISF_GEN_HEALTH,
                DART_GEN_HEALTH, DART_REVIEW_HEALTH, DART_UI_VALIDATION_HEALTH, SPS_LOAD_HEALTH,
-               DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) as days_stuck
+               DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) AS DAYS_STUCK
         FROM roster
         WHERE IS_STUCK = 1
-        ORDER BY days_stuck DESC
+        ORDER BY DAYS_STUCK DESC
     """)
 
     stuck_df = query(base_sql)
+
+    # Normalize to uppercase (SQL/LLM must use DAYS_STUCK, RED_COUNT, PRIORITY)
+    if not stuck_df.empty:
+        rename_map = {}
+        if "days_stuck" in stuck_df.columns:
+            rename_map["days_stuck"] = "DAYS_STUCK"
+        if "red_count" in stuck_df.columns:
+            rename_map["red_count"] = "RED_COUNT"
+        if rename_map:
+            stuck_df = stuck_df.rename(columns=rename_map)
 
     if state_filter:
         stuck_df = stuck_df[stuck_df["CNT_STATE"] == state_filter]
@@ -139,35 +194,39 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
             classify_rules = step["rules"]
             break
 
-    stuck_df["red_count"] = stuck_df[HEALTH_COLUMNS].apply(
+    stuck_df["RED_COUNT"] = stuck_df[HEALTH_COLUMNS].apply(
         lambda row: sum(1 for v in row if str(v).upper() == "RED"), axis=1
     )
 
     if classify_rules:
         def classify_dynamic(row):
+            ds = row.get("DAYS_STUCK", row.get("days_stuck", 0))
+            rc = row.get("RED_COUNT", row.get("red_count", 0))
             for level in ["critical", "high", "medium", "low"]:
-                rule = classify_rules.get(level, "")
-                if "days_stuck > 90" in rule and "red_count >= 2" in rule:
-                    if row["days_stuck"] > 90 and row["red_count"] >= 2:
+                rule = classify_rules.get(level, "").upper()
+                if "DAYS_STUCK > 90" in rule and "RED_COUNT >= 2" in rule:
+                    if ds > 90 and rc >= 2:
                         return level.upper()
-                elif "days_stuck > 30" in rule:
-                    if row["days_stuck"] > 30 or row["red_count"] >= 2:
+                elif "DAYS_STUCK > 30" in rule:
+                    if ds > 30 or rc >= 2:
                         return level.upper()
-                elif "days_stuck > 7" in rule:
-                    if row["days_stuck"] > 7:
+                elif "DAYS_STUCK > 7" in rule:
+                    if ds > 7:
                         return level.upper()
             return "LOW"
-        stuck_df["priority"] = stuck_df.apply(classify_dynamic, axis=1)
+        stuck_df["PRIORITY"] = stuck_df.apply(classify_dynamic, axis=1)
     else:
         def classify(row):
-            if row["days_stuck"] > 90 and row["red_count"] >= 2:
+            ds = row.get("DAYS_STUCK", row.get("days_stuck", 0))
+            rc = row.get("RED_COUNT", row.get("red_count", 0))
+            if ds > 90 and rc >= 2:
                 return "CRITICAL"
-            elif row["days_stuck"] > 30 or row["red_count"] >= 2:
+            elif ds > 30 or rc >= 2:
                 return "HIGH"
-            elif row["days_stuck"] > 7:
+            elif ds > 7:
                 return "MEDIUM"
             return "LOW"
-        stuck_df["priority"] = stuck_df.apply(classify, axis=1)
+        stuck_df["PRIORITY"] = stuck_df.apply(classify, axis=1)
 
     failed_summary = {}
     if include_failed:
@@ -206,7 +265,7 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
         "failed_summary": failed_summary,
         "market_context": market_context,
         "chart": chart,
-        "summary": f"Found {len(stuck_df)} stuck ROs. {sum(stuck_df['priority'] == 'CRITICAL')} critical, {sum(stuck_df['priority'] == 'HIGH')} high priority.",
+        "summary": f"Found {len(stuck_df)} stuck ROs. {sum(stuck_df['PRIORITY'] == 'CRITICAL')} critical, {sum(stuck_df['PRIORITY'] == 'HIGH')} high priority.",
     }
 
 
@@ -729,6 +788,141 @@ def _execute_pipeline_health_report(procedure: dict, params: dict) -> dict:
         "summary": f"Pipeline Health Report ({filter_desc}): {health_rating}. {total_ros:,} ROs, {failed_ros:,} failed ({fail_rate}%), {stuck_ros:,} stuck, {crit} critical. {len(recommended_actions)} recommended actions.",
     }
     return _sanitize_nan(result)
+
+
+def _execute_root_cause(procedure: dict, params: dict) -> dict:
+    """Trace root cause: market SCS_PERCENT low → pipeline failures → orgs/source/LOB."""
+    market = params.get("market") or params.get("state")
+
+    if not market:
+        worst_market = query("""
+            SELECT MARKET FROM metrics
+            WHERE MONTH_DATE = (SELECT MAX(MONTH_DATE) FROM metrics)
+            ORDER BY SCS_PERCENT ASC LIMIT 1
+        """)
+        market = str(worst_market.iloc[0]["MARKET"]) if not worst_market.empty else "NY"
+
+    market_scs = query(f"""
+        SELECT MARKET, MONTH, SCS_PERCENT, SCS_PERCENT - LAG(SCS_PERCENT) OVER (ORDER BY MONTH_DATE) as scs_change
+        FROM metrics WHERE MARKET = '{market}'
+        ORDER BY MONTH_DATE DESC LIMIT 6
+    """)
+
+    try:
+        file_failures = query(f"""
+            SELECT CNT_STATE, ORG_NM, SRC_SYS, COALESCE(LOB_PRIMARY, SPLIT_PART(LOB, ',', 1)) as LOB_KEY,
+                   COUNT(*) as failed_count,
+                   ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as failure_rate
+            FROM roster WHERE CNT_STATE = '{market}' AND IS_FAILED = 1
+            GROUP BY CNT_STATE, ORG_NM, SRC_SYS, LOB_KEY
+            ORDER BY failed_count DESC LIMIT 15
+        """)
+    except Exception:
+        file_failures = query(f"""
+            SELECT CNT_STATE, ORG_NM, SRC_SYS,
+                   COUNT(*) as failed_count,
+                   ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as failure_rate
+            FROM roster WHERE CNT_STATE = '{market}' AND IS_FAILED = 1
+            GROUP BY CNT_STATE, ORG_NM, SRC_SYS
+            ORDER BY failed_count DESC LIMIT 15
+        """)
+        file_failures["LOB_KEY"] = ""
+
+    lob_col = "LOB_KEY" if "LOB_KEY" in file_failures.columns else "LOB_PRIMARY"
+
+    top_orgs = file_failures.groupby("ORG_NM")["failed_count"].sum().sort_values(ascending=False).head(5)
+    top_sources = file_failures.groupby("SRC_SYS")["failed_count"].sum().sort_values(ascending=False).head(5)
+    top_lobs = file_failures.groupby(lob_col)["failed_count"].sum().sort_values(ascending=False).head(5) if lob_col in file_failures.columns else pd.Series(dtype=float)
+
+    chain = []
+    chain.append(f"1. **Market {market}** SCS_PERCENT: {market_scs.iloc[0]['SCS_PERCENT']}% (latest)" if not market_scs.empty else f"1. **Market {market}**")
+    chain.append(f"2. **Pipeline failures** in {market}: {len(file_failures)} org-source-LOB combinations with failures")
+    if not top_orgs.empty:
+        chain.append(f"3. **Top failing orgs**: {', '.join(top_orgs.index.tolist()[:3])}")
+    if not top_sources.empty:
+        chain.append(f"4. **Source systems**: {', '.join(str(s) for s in top_sources.index.tolist()[:3])}")
+    if not top_lobs.empty:
+        chain.append(f"5. **LOB concentration**: {', '.join(str(l) for l in top_lobs.index.tolist()[:3])}")
+
+    return {
+        "procedure": "trace_root_cause",
+        "market": market,
+        "causal_chain": chain,
+        "market_trend": market_scs.to_dict(orient="records"),
+        "file_failures_by_org_source_lob": file_failures.to_dict(orient="records"),
+        "top_orgs": top_orgs.to_dict(),
+        "top_sources": top_sources.to_dict(),
+        "top_lobs": top_lobs.to_dict(),
+        "summary": f"Root cause trace for {market}: low SCS → {len(file_failures)} failure combos. Top orgs: {', '.join(top_orgs.index.tolist()[:2]) if not top_orgs.empty else 'N/A'}.",
+    }
+
+
+def _execute_rejection_clustering(procedure: dict, params: dict) -> dict:
+    """Cluster rejection patterns by FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, LOB, SRC_SYS."""
+    try:
+        failed_df = query("""
+            SELECT FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, COALESCE(LOB_PRIMARY, SPLIT_PART(LOB, ',', 1)) as LOB_KEY, SRC_SYS, CNT_STATE,
+                   COUNT(*) as cnt
+            FROM roster
+            WHERE IS_FAILED = 1 AND (FAILURE_STATUS IS NOT NULL OR FAILURE_CATEGORY != 'NONE')
+            GROUP BY FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, LOB_KEY, SRC_SYS, CNT_STATE
+            ORDER BY cnt DESC
+        """)
+    except Exception:
+        failed_df = query("""
+            SELECT FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, SRC_SYS, CNT_STATE,
+                   COUNT(*) as cnt
+            FROM roster
+            WHERE IS_FAILED = 1 AND (FAILURE_STATUS IS NOT NULL OR FAILURE_CATEGORY != 'NONE')
+            GROUP BY FAILURE_STATUS, FAILURE_CATEGORY, ORG_NM, SRC_SYS, CNT_STATE
+            ORDER BY cnt DESC
+        """)
+        failed_df["LOB_KEY"] = ""
+
+    lob_col = "LOB_KEY" if "LOB_KEY" in failed_df.columns else "LOB_PRIMARY"
+
+    if failed_df.empty:
+        return {
+            "procedure": "rejection_pattern_clustering",
+            "clusters": [],
+            "pattern_summary": [],
+            "summary": "No failed ROs with failure status to cluster.",
+        }
+
+    by_status = failed_df.groupby("FAILURE_STATUS")["cnt"].sum().sort_values(ascending=False)
+    by_category = failed_df.groupby("FAILURE_CATEGORY")["cnt"].sum().sort_values(ascending=False)
+    by_org = failed_df.groupby("ORG_NM")["cnt"].sum().sort_values(ascending=False).head(10)
+    by_lob = failed_df.groupby(lob_col)["cnt"].sum().sort_values(ascending=False).head(10) if lob_col in failed_df.columns else pd.Series(dtype=float)
+    by_source = failed_df.groupby("SRC_SYS")["cnt"].sum().sort_values(ascending=False).head(10)
+
+    pattern_summary = []
+    if len(by_org) > 0:
+        total_org = by_org.sum()
+        if total_org > 0 and by_org.iloc[0] > total_org * 0.3:
+            pattern_summary.append({"pattern": "org_specific", "note": f"Top org '{by_org.index[0]}' has {int(by_org.iloc[0])} failures ({100*by_org.iloc[0]/total_org:.0f}%) — likely org-specific data quality"})
+    if len(by_source) > 0:
+        total_src = by_source.sum()
+        if total_src > 0 and by_source.iloc[0] > total_src * 0.4:
+            pattern_summary.append({"pattern": "source_system_wide", "note": f"Source '{by_source.index[0]}' dominates ({int(by_source.iloc[0])} failures) — systemic source issue"})
+    if len(by_lob) > 0:
+        total_lob = by_lob.sum()
+        if total_lob > 0 and by_lob.iloc[0] > total_lob * 0.3:
+            pattern_summary.append({"pattern": "lob_specific", "note": f"LOB '{by_lob.index[0]}' has {int(by_lob.iloc[0])} failures — LOB-specific compliance or format"})
+
+    if not pattern_summary:
+        pattern_summary.append({"pattern": "distributed", "note": "Failures distributed across orgs/sources/LOBs — no single dominant pattern"})
+
+    return {
+        "procedure": "rejection_pattern_clustering",
+        "by_failure_status": by_status.to_dict(),
+        "by_failure_category": by_category.to_dict(),
+        "by_org": by_org.to_dict(),
+        "by_lob": by_lob.to_dict(),
+        "by_source": by_source.to_dict(),
+        "pattern_summary": pattern_summary,
+        "sample_clusters": failed_df.head(25).to_dict(orient="records"),
+        "summary": f"Clustered {len(failed_df)} failure combinations. Patterns: {'; '.join(p['pattern'] for p in pattern_summary)}.",
+    }
 
 
 def _sanitize_nan(obj):

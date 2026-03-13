@@ -186,9 +186,10 @@ def _build_schema_text() -> str:
 
     global_rules = """
 ## IMPORTANT QUERY RULES
-- ALL categorical string values are UPPERCASE. Always use UPPER case in WHERE clauses.
-  Health: 'RED', 'GREEN', 'YELLOW'  |  Priority: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'
-  Failure category: 'NONE', 'VALIDATION', 'OTHER'  |  States: 2-letter codes like 'TN', 'NY'
+- ALL column names and aliases MUST be UPPERCASE. Never use lowercase (e.g. days_stuck, red_count).
+  Use: DAYS_STUCK, RED_COUNT, PRIORITY, CNT_STATE, ORG_NM. Aliases: AS DAYS_STUCK, AS FAILURE_RATE.
+- ALL categorical string values are UPPERCASE. Health: 'RED','GREEN','YELLOW' | Priority: 'CRITICAL','HIGH','MEDIUM','LOW'
+  Failure category: 'NONE','VALIDATION','OTHER' | States: 2-letter codes like 'TN','NY'
 - IS_FAILED, IS_STUCK, IS_RETRY, IS_BELOW_SLA are INTEGER (0/1). Use =1 or =0, NEVER =TRUE/FALSE.
 - There is NO column called 'status' or 'attempt_number'. Use IS_FAILED, IS_STUCK, RUN_NO.
 - Use exact column names from the schema. Column names are UPPER_SNAKE_CASE.
