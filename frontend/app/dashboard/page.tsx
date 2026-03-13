@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
@@ -8,12 +8,12 @@ import {
   getAlerts,
   getIntelligence,
   getLatestReport,
-  type Alert,
-  type IntelligenceData,
-  type PipelineReport,
+  getDashboardOptions,
+  getDashboardChart,
 } from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { PlotlyChart } from "@/components/charts/PlotlyChart";
 import {
   LayoutDashboard,
   Layers,
@@ -31,7 +31,11 @@ import {
   FileText,
   ChevronDown,
   ChevronRight,
+  BarChart3,
+  MapPin,
+  Clock,
 } from "lucide-react";
+import type { Alert, IntelligenceData, PipelineReport } from "@/lib/api";
 
 interface DashboardData {
   total_ros: number;
@@ -55,6 +59,31 @@ const healthStatusColors: Record<string, { bg: string; text: string; ring: strin
   critical: { bg: "bg-red-50", text: "text-red-700", ring: "ring-red-200" },
 };
 
+const MONTH_LABELS: Record<string, string> = {
+  "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr", "05": "May", "06": "Jun",
+  "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+};
+function monthLabel(mmYyyy: string): string {
+  const [mm, yyyy] = mmYyyy.split("-");
+  return `${MONTH_LABELS[mm] || mm} ${yyyy}`;
+}
+
+function getMonthOptions(apiMonths: string[]): string[] {
+  if (apiMonths?.length) return apiMonths;
+  const out: string[] = [];
+  const now = new Date();
+  for (let i = 0; i < 48; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    out.push(`${mm}-${yyyy}`);
+  }
+  return out;
+}
+
+type TabId = "overview" | "charts";
+type TimeFilter = "all" | "7d" | "1m" | "custom";
+
 export default function DashboardPage() {
   const router = useRouter();
   const [data, setData] = useState<DashboardData | null>(null);
@@ -63,9 +92,47 @@ export default function DashboardPage() {
   const [report, setReport] = useState<PipelineReport | null>(null);
   const [reportExpanded, setReportExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
 
-  useEffect(() => {
-    Promise.all([getDashboardOverview(), getAlerts(), getIntelligence(), getLatestReport()])
+  const [filterState, setFilterState] = useState<string>("");
+  const [filterMarket, setFilterMarket] = useState<string>("");
+  const [filterTime, setFilterTime] = useState<TimeFilter>("all");
+  const [filterMonths, setFilterMonths] = useState<number>(6);
+  const [filterMonthsMode, setFilterMonthsMode] = useState<"preset" | "custom">("preset");
+  const [filterFromMonth, setFilterFromMonth] = useState<string>("");
+  const [filterToMonth, setFilterToMonth] = useState<string>("");
+  const [options, setOptions] = useState<{ states: string[]; markets: string[]; months: string[] }>({
+    states: [],
+    markets: [],
+    months: [],
+  });
+
+  const [charts, setCharts] = useState<{
+    heatmap: Record<string, unknown> | null;
+    market_trend: Record<string, unknown> | null;
+    retry_lift: Record<string, unknown> | null;
+    stuck_tracker: Record<string, unknown> | null;
+  }>({ heatmap: null, market_trend: null, retry_lift: null, stuck_tracker: null });
+  const [chartsLoading, setChartsLoading] = useState(false);
+
+  const loadData = useCallback(() => {
+    setLoading(true);
+    const useCustomRange = filterTime === "custom" && filterFromMonth && filterToMonth;
+    const overviewParams =
+      filterState || filterTime !== "all" || useCustomRange
+        ? {
+            state: filterState || undefined,
+            time_filter: useCustomRange ? "all" : filterTime,
+            from_month: useCustomRange ? filterFromMonth : undefined,
+            to_month: useCustomRange ? filterToMonth : undefined,
+          }
+        : undefined;
+    Promise.all([
+      getDashboardOverview(overviewParams),
+      getAlerts(),
+      getIntelligence(),
+      getLatestReport(),
+    ])
       .then(([overview, alertData, intelligence, latestReport]) => {
         setData(overview);
         setAlerts(alertData?.alerts || []);
@@ -74,7 +141,53 @@ export default function DashboardPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
+  }, [filterState, filterTime, filterFromMonth, filterToMonth]);
+
+  const loadCharts = useCallback(() => {
+    setChartsLoading(true);
+    const useCustomRange = filterMonthsMode === "custom" && filterFromMonth && filterToMonth;
+    const rosterCustom = filterTime === "custom" && filterFromMonth && filterToMonth;
+    const rosterParams = {
+      state: filterState || undefined,
+      time_filter: rosterCustom ? "all" : filterTime,
+      from_month: rosterCustom ? filterFromMonth : undefined,
+      to_month: rosterCustom ? filterToMonth : undefined,
+    };
+    const metricsParams = {
+      market: filterMarket || undefined,
+      months: useCustomRange ? undefined : filterMonths,
+      from_month: useCustomRange ? filterFromMonth : undefined,
+      to_month: useCustomRange ? filterToMonth : undefined,
+    };
+    Promise.all([
+      getDashboardChart("heatmap", rosterParams),
+      getDashboardChart("market_trend", metricsParams),
+      getDashboardChart("retry_lift", metricsParams),
+      getDashboardChart("stuck_tracker", rosterParams),
+    ])
+      .then(([h, mt, rl, st]) => {
+        setCharts({
+          heatmap: h.chart || null,
+          market_trend: mt.chart || null,
+          retry_lift: rl.chart || null,
+          stuck_tracker: st.chart || null,
+        });
+      })
+      .catch(console.error)
+      .finally(() => setChartsLoading(false));
+  }, [filterState, filterMarket, filterTime, filterMonths, filterMonthsMode, filterFromMonth, filterToMonth]);
+
+  useEffect(() => {
+    getDashboardOptions().then(setOptions).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    if (activeTab === "charts") loadCharts();
+  }, [activeTab, loadCharts]);
 
   const navigateToChat = (message: string) => {
     const encoded = encodeURIComponent(message);
@@ -133,17 +246,185 @@ export default function DashboardPage() {
       transition={{ duration: 0.4, ease: "easeOut" }}
       className="p-8 space-y-8 min-h-screen bg-gradient-to-br from-slate-50/80 via-white to-indigo-50/20"
     >
-      {/* Header */}
-      <div className="flex items-center gap-4">
-        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-200/50">
-          <LayoutDashboard className="w-6 h-6 text-white" />
+      {/* Header + Filters */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-200/50">
+              <LayoutDashboard className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Pipeline Dashboard</h2>
+              <p className="text-sm text-slate-500 mt-0.5">Overview of roster pipeline operations</p>
+            </div>
+          </div>
+          <button
+            onClick={() => loadData()}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-50 text-indigo-600 text-sm font-medium hover:bg-indigo-100 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Refresh
+          </button>
         </div>
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Pipeline Dashboard</h2>
-          <p className="text-sm text-slate-500 mt-0.5">Overview of roster pipeline operations</p>
-        </div>
+
+        {/* Interactive Filters */}
+        <Card className="bg-white/80 border border-gray-100 p-4 rounded-2xl">
+          <div className="flex flex-wrap items-center gap-4">
+            {activeTab === "overview" && (
+              <>
+                <div className="flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-gray-500" />
+                  <select
+                    value={filterState}
+                    onChange={(e) => setFilterState(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  >
+                    <option value="">All states</option>
+                    {options.states.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-gray-500" />
+                  <select
+                    value={filterTime}
+                    onChange={(e) => setFilterTime(e.target.value as TimeFilter)}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  >
+                    <option value="all">All time</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="1m">Last month</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </div>
+                {filterTime === "custom" && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-500">From:</span>
+                      <select
+                        value={filterFromMonth}
+                        onChange={(e) => setFilterFromMonth(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      >
+                        <option value="">Select month</option>
+                        {getMonthOptions(options.months || []).map((m) => (
+                          <option key={m} value={m}>{monthLabel(m)}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-500">To:</span>
+                      <select
+                        value={filterToMonth}
+                        onChange={(e) => setFilterToMonth(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      >
+                        <option value="">Select month</option>
+                        {getMonthOptions(options.months || []).map((m) => (
+                          <option key={m} value={m}>{monthLabel(m)}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+            {activeTab === "charts" && (
+              <>
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-gray-500" />
+                  <select
+                    value={filterMarket}
+                    onChange={(e) => setFilterMarket(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  >
+                    <option value="">All markets</option>
+                    {options.markets.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500">Trend:</span>
+                  <select
+                    value={filterMonthsMode === "custom" ? "custom" : filterMonths}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "custom") setFilterMonthsMode("custom");
+                      else {
+                        setFilterMonthsMode("preset");
+                        setFilterMonths(Number(v));
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  >
+                    <option value={3}>3 months</option>
+                    <option value={6}>6 months</option>
+                    <option value={12}>12 months</option>
+                    <option value={18}>18 months</option>
+                    <option value={24}>24 months</option>
+                    <option value={36}>36 months</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </div>
+                {filterMonthsMode === "custom" && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-500">From:</span>
+                      <select
+                        value={filterFromMonth}
+                        onChange={(e) => setFilterFromMonth(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      >
+                        <option value="">Select month</option>
+                        {getMonthOptions(options.months || []).map((m) => (
+                          <option key={m} value={m}>{monthLabel(m)}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-500">To:</span>
+                      <select
+                        value={filterToMonth}
+                        onChange={(e) => setFilterToMonth(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      >
+                        <option value="">Select month</option>
+                        {getMonthOptions(options.months || []).map((m) => (
+                          <option key={m} value={m}>{monthLabel(m)}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+            <div className="flex gap-2 ml-auto">
+              <button
+                onClick={() => setActiveTab("overview")}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  activeTab === "overview" ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                Overview
+              </button>
+              <button
+                onClick={() => setActiveTab("charts")}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  activeTab === "charts" ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                Charts
+              </button>
+            </div>
+          </div>
+        </Card>
       </div>
 
+      {/* Overview Tab */}
+      {activeTab === "overview" && (
+        <>
       {/* Pipeline Health Banner */}
       {intel && (
         <Card className={`${hColors.bg} border-0 ring-1 ${hColors.ring} p-5 rounded-2xl shadow-sm`}>
@@ -593,6 +874,82 @@ export default function DashboardPage() {
           </div>
         </Card>
       </div>
+        </>
+      )}
+
+      {/* Charts Tab */}
+      {activeTab === "charts" && (
+        <div className="space-y-6">
+          {chartsLoading ? (
+            <div className="flex items-center justify-center py-16">
+              <div className="flex gap-2">
+                <div className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-bounce" />
+                <div className="w-2.5 h-2.5 bg-violet-500 rounded-full animate-bounce [animation-delay:0.15s]" />
+                <div className="w-2.5 h-2.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.3s]" />
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-6">
+                <Card className="bg-white border-0 ring-1 ring-gray-100 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-800 mb-4">Pipeline Stage Health Heatmap</h3>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {filterState ? `State: ${filterState}` : "All states"} · {filterTime === "7d" ? "Last 7 days" : filterTime === "1m" ? "Last month" : filterTime === "custom" && filterFromMonth && filterToMonth ? `${monthLabel(filterFromMonth)} – ${monthLabel(filterToMonth)}` : "All time"}
+                  </p>
+                  <div className="h-[400px]">
+                    {charts.heatmap ? <PlotlyChart data={charts.heatmap} /> : <p className="text-sm text-gray-400">No data</p>}
+                  </div>
+                </Card>
+                <Card className="bg-white border-0 ring-1 ring-gray-100 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-800 mb-4">Market SCS% Trend</h3>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {filterMarket ? `Market: ${filterMarket}` : "All markets"} · {filterMonthsMode === "custom" && filterFromMonth && filterToMonth ? `${monthLabel(filterFromMonth)} – ${monthLabel(filterToMonth)}` : `Last ${filterMonths} months`}
+                  </p>
+                  <div className="h-[400px]">
+                    {charts.market_trend ? <PlotlyChart data={charts.market_trend} /> : <p className="text-sm text-gray-400">No data</p>}
+                  </div>
+                </Card>
+              </div>
+              <div className="grid grid-cols-2 gap-6">
+                <Card className="bg-white border-0 ring-1 ring-gray-100 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-800 mb-4">Retry Lift by Market</h3>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {filterMarket ? `Market: ${filterMarket}` : "All markets"} · {filterMonthsMode === "custom" && filterFromMonth && filterToMonth ? `${monthLabel(filterFromMonth)} – ${monthLabel(filterToMonth)}` : `Last ${filterMonths} months`}
+                  </p>
+                  <div className="h-[400px]">
+                    {charts.retry_lift ? <PlotlyChart data={charts.retry_lift} /> : <p className="text-sm text-gray-400">No data</p>}
+                  </div>
+                </Card>
+                <Card className="bg-white border-0 ring-1 ring-gray-100 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-800 mb-4">Stuck RO Tracker</h3>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {filterState ? `State: ${filterState}` : "All states"} · {filterTime === "7d" ? "Last 7 days" : filterTime === "1m" ? "Last month" : filterTime === "custom" && filterFromMonth && filterToMonth ? `${monthLabel(filterFromMonth)} – ${monthLabel(filterToMonth)}` : "All time"}
+                  </p>
+                  <div className="h-[400px]">
+                    {charts.stuck_tracker ? <PlotlyChart data={charts.stuck_tracker} /> : <p className="text-sm text-gray-400">No stuck ROs</p>}
+                  </div>
+                </Card>
+              </div>
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => navigateToChat("Show me pipeline health heatmap and stuck ROs")}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-50 text-indigo-600 text-sm font-medium hover:bg-indigo-100 transition-colors"
+                >
+                  <Play className="w-4 h-4" />
+                  Ask in Chat
+                </button>
+                <button
+                  onClick={loadCharts}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Reload charts
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </motion.div>
   );
 }

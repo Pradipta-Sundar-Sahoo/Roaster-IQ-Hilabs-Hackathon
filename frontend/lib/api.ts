@@ -109,8 +109,51 @@ export async function getHealth() {
   return res.json();
 }
 
-export async function getDashboardOverview() {
-  const res = await fetch(`${API_BASE}/dashboard/overview`);
+export async function getDashboardOverview(params?: {
+  state?: string;
+  time_filter?: string;
+  from_month?: string;
+  to_month?: string;
+}) {
+  const sp = new URLSearchParams();
+  if (params?.state) sp.set("state", params.state);
+  if (params?.time_filter) sp.set("time_filter", params.time_filter);
+  if (params?.from_month) sp.set("from_month", params.from_month);
+  if (params?.to_month) sp.set("to_month", params.to_month);
+  const q = sp.toString();
+  const res = await fetch(`${API_BASE}/dashboard/overview${q ? `?${q}` : ""}`);
+  return res.json();
+}
+
+export async function getDashboardOptions(): Promise<{
+  states: string[];
+  markets: string[];
+  months: string[];
+}> {
+  const res = await fetch(`${API_BASE}/dashboard/options`);
+  return res.json();
+}
+
+export async function getDashboardChart(
+  type: "heatmap" | "market_trend" | "retry_lift" | "stuck_tracker",
+  params?: {
+    state?: string;
+    market?: string;
+    time_filter?: string;
+    months?: number;
+    from_month?: string;
+    to_month?: string;
+  }
+): Promise<{ chart: Record<string, unknown>; filters?: Record<string, unknown> }> {
+  const sp = new URLSearchParams();
+  if (params?.state) sp.set("state", params.state);
+  if (params?.market) sp.set("market", params.market);
+  if (params?.time_filter) sp.set("time_filter", params.time_filter);
+  if (params?.months != null) sp.set("months", String(params.months));
+  if (params?.from_month) sp.set("from_month", params.from_month);
+  if (params?.to_month) sp.set("to_month", params.to_month);
+  const q = sp.toString();
+  const res = await fetch(`${API_BASE}/dashboard/charts/${type}${q ? `?${q}` : ""}`);
   return res.json();
 }
 

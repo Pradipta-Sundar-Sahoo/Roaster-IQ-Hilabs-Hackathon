@@ -215,31 +215,66 @@ async def create_procedure(request: CreateProcedureRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _roster_time_cond(time_filter: str, from_month: str | None, to_month: str | None) -> str | None:
+    """Build roster time condition. Returns SQL fragment or None."""
+    if from_month and to_month:
+        return (
+            f"CAST(FILE_RECEIVED_DT AS TIMESTAMP) >= STRPTIME('{from_month}', '%m-%Y') "
+            f"AND CAST(FILE_RECEIVED_DT AS TIMESTAMP) < STRPTIME('{to_month}', '%m-%Y') + INTERVAL '1 month'"
+        )
+    if time_filter == "7d":
+        return "CAST(FILE_RECEIVED_DT AS TIMESTAMP) >= CURRENT_TIMESTAMP - INTERVAL '7 days'"
+    if time_filter == "1m":
+        return "CAST(FILE_RECEIVED_DT AS TIMESTAMP) >= CURRENT_TIMESTAMP - INTERVAL '1 month'"
+    return None
+
+
+def _metrics_time_cond(months: int | None, from_month: str | None, to_month: str | None) -> str | None:
+    """Build metrics time condition. Returns SQL fragment or None."""
+    if from_month and to_month:
+        return (
+            f"MONTH_DATE >= STRPTIME('{from_month}', '%m-%Y') "
+            f"AND MONTH_DATE < STRPTIME('{to_month}', '%m-%Y') + INTERVAL '1 month'"
+        )
+    if months:
+        return f"MONTH_DATE >= CURRENT_DATE - INTERVAL '{months} months'"
+    return None
+
+
 @app.get("/dashboard/overview")
-async def dashboard_overview():
+async def dashboard_overview(
+    state: str | None = None,
+    time_filter: str = "all",
+    from_month: str | None = None,
+    to_month: str | None = None,
+):
+    """Overview. time_filter: all | 7d | 1m. Or use from_month/to_month (MM-YYYY) for custom range."""
     from data_loader import query
 
-    # Key stats from both CSVs
-    stuck_count = query("SELECT COUNT(*) as cnt FROM roster WHERE IS_STUCK = 1").iloc[0]["cnt"]
-    failed_count = query("SELECT COUNT(*) as cnt FROM roster WHERE IS_FAILED = 1").iloc[0]["cnt"]
-    total_ros = query("SELECT COUNT(*) as cnt FROM roster").iloc[0]["cnt"]
+    conds = []
+    if state:
+        conds.append(f"CNT_STATE = '{state}'")
+    tc = _roster_time_cond(time_filter, from_month, to_month)
+    if tc:
+        conds.append(tc)
+    where = " AND ".join(conds) if conds else "1=1"
 
-    # Health flag distribution
+    stuck_count = query(f"SELECT COUNT(*) as cnt FROM roster WHERE IS_STUCK = 1 AND {where}").iloc[0]["cnt"]
+    failed_count = query(f"SELECT COUNT(*) as cnt FROM roster WHERE IS_FAILED = 1 AND {where}").iloc[0]["cnt"]
+    total_ros = query(f"SELECT COUNT(*) as cnt FROM roster WHERE {where}").iloc[0]["cnt"]
+
     health_cols = [
         "PRE_PROCESSING_HEALTH", "MAPPING_APROVAL_HEALTH", "ISF_GEN_HEALTH",
         "DART_GEN_HEALTH", "DART_REVIEW_HEALTH", "DART_UI_VALIDATION_HEALTH", "SPS_LOAD_HEALTH"
     ]
     red_counts = {}
     for col in health_cols:
-        cnt = query(f"SELECT COUNT(*) as cnt FROM roster WHERE \"{col}\" = 'RED'").iloc[0]["cnt"]
+        cnt = query(f'SELECT COUNT(*) as cnt FROM roster WHERE "{col}" = \'RED\' AND {where}').iloc[0]["cnt"]
         red_counts[col] = int(cnt)
 
-    # Market metrics
     latest_month = query("SELECT MONTH FROM metrics ORDER BY MONTH DESC LIMIT 1").iloc[0]["MONTH"]
     market_summary = query(f"""
-        SELECT MARKET, SCS_PERCENT
-        FROM metrics
-        WHERE MONTH = '{latest_month}'
+        SELECT MARKET, SCS_PERCENT FROM metrics WHERE MONTH = '{latest_month}'
         ORDER BY SCS_PERCENT ASC
     """).to_dict(orient="records")
 
@@ -250,7 +285,128 @@ async def dashboard_overview():
         "red_health_flags": red_counts,
         "latest_month": latest_month,
         "market_summary": market_summary,
+        "filters": {"state": state, "time_filter": time_filter},
     }
+
+
+@app.get("/dashboard/charts/heatmap")
+async def dashboard_chart_heatmap(
+    state: str | None = None,
+    time_filter: str = "all",
+    from_month: str | None = None,
+    to_month: str | None = None,
+):
+    """Pipeline stage health heatmap. time_filter: all | 7d | 1m. Or from_month/to_month (MM-YYYY)."""
+    from data_loader import query
+    from tools.visualizations import create_health_heatmap
+
+    conds = []
+    if state:
+        conds.append(f"CNT_STATE = '{state}'")
+    tc = _roster_time_cond(time_filter, from_month, to_month)
+    if tc:
+        conds.append(tc)
+    where = " AND ".join(conds) if conds else "1=1"
+    df = query(f"""
+        SELECT ORG_NM, PRE_PROCESSING_HEALTH, MAPPING_APROVAL_HEALTH,
+               ISF_GEN_HEALTH, DART_GEN_HEALTH, DART_REVIEW_HEALTH,
+               DART_UI_VALIDATION_HEALTH, SPS_LOAD_HEALTH
+        FROM roster WHERE {where} LIMIT 30
+    """)
+    chart = create_health_heatmap(df)
+    return {"chart": chart, "filters": {"state": state, "time_filter": time_filter}}
+
+
+@app.get("/dashboard/charts/market_trend")
+async def dashboard_chart_market_trend(
+    market: str | None = None,
+    months: int | None = 6,
+    from_month: str | None = None,
+    to_month: str | None = None,
+):
+    """Market SCS% trend. months: 3|6|12|18|24|36. Or from_month/to_month (MM-YYYY)."""
+    from data_loader import query
+    from tools.visualizations import create_market_trend
+
+    tc = _metrics_time_cond(months, from_month, to_month)
+    where = tc or "1=1"
+    if market:
+        where += f" AND MARKET = '{market}'"
+    df = query(f"SELECT * FROM metrics WHERE {where} ORDER BY MARKET, MONTH")
+    chart = create_market_trend(df, market)
+    return {"chart": chart, "filters": {"market": market, "months": months}}
+
+
+@app.get("/dashboard/charts/retry_lift")
+async def dashboard_chart_retry_lift(
+    market: str | None = None,
+    months: int | None = 6,
+    from_month: str | None = None,
+    to_month: str | None = None,
+):
+    """Retry lift chart. months: 3|6|12|18|24|36. Or from_month/to_month (MM-YYYY)."""
+    from data_loader import query
+    from tools.visualizations import create_retry_lift
+
+    tc = _metrics_time_cond(months, from_month, to_month)
+    where = tc or "1=1"
+    if market:
+        where += f" AND MARKET = '{market}'"
+    df = query(f"""
+        SELECT MARKET, MONTH, FIRST_ITER_SCS_CNT, NEXT_ITER_SCS_CNT, OVERALL_SCS_CNT
+        FROM metrics WHERE {where} ORDER BY MARKET, MONTH
+    """)
+    chart = create_retry_lift(df)
+    return {"chart": chart, "filters": {"market": market, "months": months}}
+
+
+@app.get("/dashboard/charts/stuck_tracker")
+async def dashboard_chart_stuck_tracker(
+    state: str | None = None,
+    time_filter: str = "all",
+    from_month: str | None = None,
+    to_month: str | None = None,
+):
+    """Stuck RO tracker. time_filter: all | 7d | 1m. Or from_month/to_month (MM-YYYY)."""
+    from data_loader import query
+    from tools.visualizations import create_stuck_tracker
+
+    conds = ["IS_STUCK = 1"]
+    if state:
+        conds.append(f"CNT_STATE = '{state}'")
+    tc = _roster_time_cond(time_filter, from_month, to_month)
+    if tc:
+        conds.append(tc)
+    where = " AND ".join(conds)
+    df = query(f"""
+        SELECT RO_ID, ORG_NM, CNT_STATE, LATEST_STAGE_NM, FILE_RECEIVED_DT,
+               PRE_PROCESSING_HEALTH, MAPPING_APROVAL_HEALTH, ISF_GEN_HEALTH,
+               DART_GEN_HEALTH, DART_REVIEW_HEALTH, DART_UI_VALIDATION_HEALTH, SPS_LOAD_HEALTH,
+               DATEDIFF('day', CAST(FILE_RECEIVED_DT AS TIMESTAMP), CURRENT_TIMESTAMP) AS DAYS_STUCK
+        FROM roster WHERE {where} ORDER BY DAYS_STUCK DESC
+    """)
+    if not df.empty:
+        health_cols = ["PRE_PROCESSING_HEALTH", "MAPPING_APROVAL_HEALTH", "ISF_GEN_HEALTH",
+                       "DART_GEN_HEALTH", "DART_REVIEW_HEALTH", "DART_UI_VALIDATION_HEALTH", "SPS_LOAD_HEALTH"]
+        df["RED_COUNT"] = df[health_cols].apply(lambda r: sum(1 for v in r if str(v).upper() == "RED"), axis=1)
+        df["PRIORITY"] = df.apply(
+            lambda r: "CRITICAL" if r["DAYS_STUCK"] > 90 and r["RED_COUNT"] >= 2
+            else "HIGH" if r["DAYS_STUCK"] > 30 or r["RED_COUNT"] >= 2
+            else "MEDIUM" if r["DAYS_STUCK"] > 7 else "LOW", axis=1
+        )
+    chart = create_stuck_tracker(df)
+    return {"chart": chart, "filters": {"state": state, "time_filter": time_filter}}
+
+
+@app.get("/dashboard/options")
+async def dashboard_options():
+    """Return filter options: states, markets, months (MM-YYYY)."""
+    from data_loader import query
+
+    states = query("SELECT DISTINCT CNT_STATE FROM roster WHERE CNT_STATE IS NOT NULL ORDER BY CNT_STATE").iloc[:, 0].tolist()
+    markets = query("SELECT DISTINCT MARKET FROM metrics WHERE MARKET IS NOT NULL ORDER BY MARKET").iloc[:, 0].tolist()
+    months = query("SELECT DISTINCT MONTH FROM metrics WHERE MONTH IS NOT NULL ORDER BY MONTH DESC").iloc[:, 0].tolist()
+    return {"states": states, "markets": markets, "months": months}
 
 
 @app.get("/dashboard/alerts")
