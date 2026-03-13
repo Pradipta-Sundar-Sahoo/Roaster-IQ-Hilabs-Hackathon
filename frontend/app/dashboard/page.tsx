@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { motion } from "framer-motion";
 import {
   getDashboardOverview,
   getAlerts,
@@ -82,26 +83,34 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full bg-[#f8f9fb]">
-        <div className="flex flex-col items-center gap-3">
-          <div className="flex gap-1.5">
+      <div className="flex items-center justify-center h-full bg-gradient-to-br from-slate-50 via-white to-indigo-50/30">
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex flex-col items-center gap-4"
+        >
+          <div className="flex gap-2">
             <div className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-bounce" />
-            <div className="w-2.5 h-2.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.15s]" />
-            <div className="w-2.5 h-2.5 bg-indigo-300 rounded-full animate-bounce [animation-delay:0.3s]" />
+            <div className="w-2.5 h-2.5 bg-violet-500 rounded-full animate-bounce [animation-delay:0.15s]" />
+            <div className="w-2.5 h-2.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.3s]" />
           </div>
-          <p className="text-gray-400 text-sm">Loading dashboard...</p>
-        </div>
+          <p className="text-slate-500 text-sm font-medium">Loading dashboard...</p>
+        </motion.div>
       </div>
     );
   }
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center h-full bg-[#f8f9fb]">
-        <div className="text-center space-y-2">
-          <XCircle className="w-10 h-10 text-gray-300 mx-auto" />
-          <p className="text-gray-400">Failed to load dashboard. Is the backend running?</p>
-        </div>
+      <div className="flex items-center justify-center h-full bg-gradient-to-br from-slate-50 via-white to-indigo-50/30">
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="text-center space-y-3"
+        >
+          <XCircle className="w-12 h-12 text-slate-300 mx-auto" />
+          <p className="text-slate-500">Failed to load dashboard. Is the backend running?</p>
+        </motion.div>
       </div>
     );
   }
@@ -111,20 +120,27 @@ export default function DashboardPage() {
   const hColors = healthStatusColors[hStatus] || healthStatusColors.healthy;
 
   const kpis = [
-    { label: "Total ROs", value: data.total_ros.toLocaleString(), icon: Layers, color: "text-indigo-600", bg: "bg-indigo-50", ring: "ring-indigo-100" },
-    { label: "Stuck ROs", value: data.stuck_ros, icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-50", ring: "ring-amber-100" },
-    { label: "Failed ROs", value: data.failed_ros.toLocaleString(), icon: XCircle, color: "text-red-500", bg: "bg-red-50", ring: "ring-red-100" },
-    { label: "Red Health Flags", value: totalRedFlags.toLocaleString(), icon: ShieldAlert, color: "text-rose-500", bg: "bg-rose-50", ring: "ring-rose-100" },
+    { label: "Total ROs", value: data.total_ros.toLocaleString(), icon: Layers, color: "text-indigo-600", bg: "bg-indigo-500/10", ring: "ring-indigo-200/50" },
+    { label: "Stuck ROs", value: data.stuck_ros, icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-500/10", ring: "ring-amber-200/50" },
+    { label: "Failed ROs", value: data.failed_ros.toLocaleString(), icon: XCircle, color: "text-red-500", bg: "bg-red-500/10", ring: "ring-red-200/50" },
+    { label: "Red Health Flags", value: totalRedFlags.toLocaleString(), icon: ShieldAlert, color: "text-rose-500", bg: "bg-rose-500/10", ring: "ring-rose-200/50" },
   ];
 
   return (
-    <div className="p-8 space-y-8 bg-[#f8f9fb] min-h-screen">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.4, ease: "easeOut" }}
+      className="p-8 space-y-8 min-h-screen bg-gradient-to-br from-slate-50/80 via-white to-indigo-50/20"
+    >
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <LayoutDashboard className="w-5 h-5 text-indigo-500" />
+      <div className="flex items-center gap-4">
+        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-200/50">
+          <LayoutDashboard className="w-6 h-6 text-white" />
+        </div>
         <div>
-          <h2 className="text-xl font-bold text-gray-900">Pipeline Dashboard</h2>
-          <p className="text-sm text-gray-400">Overview of roster pipeline operations</p>
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Pipeline Dashboard</h2>
+          <p className="text-sm text-slate-500 mt-0.5">Overview of roster pipeline operations</p>
         </div>
       </div>
 
@@ -577,6 +593,6 @@ export default function DashboardPage() {
           </div>
         </Card>
       </div>
-    </div>
+    </motion.div>
   );
 }

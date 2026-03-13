@@ -51,6 +51,11 @@
 :root {
   --background: oklch(0.985 0 0);
   --foreground: oklch(0.145 0 0);
+  --gradient-start: #6366f1;
+  --gradient-end: #8b5cf6;
+  --gradient-mesh: radial-gradient(at 40% 20%, hsla(263, 70%, 65%, 0.08) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, hsla(240, 70%, 65%, 0.06) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, hsla(262, 70%, 70%, 0.05) 0px, transparent 50%);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -127,5 +132,24 @@
   html {
     @apply font-sans;
     scroll-behavior: smooth;
+  }
+}
+
+/* AI SaaS utilities */
+@layer utilities {
+  .glass {
+    @apply bg-white/70 dark:bg-gray-900/70 backdrop-blur-xl border border-white/20 dark:border-gray-700/50;
+  }
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-sm border border-gray-200/60 shadow-lg shadow-gray-200/50 dark:shadow-gray-900/30;
+  }
+  .gradient-ai {
+    @apply bg-gradient-to-br from-indigo-500 via-violet-500 to-blue-600;
+  }
+  .gradient-ai-subtle {
+    @apply bg-gradient-to-br from-indigo-50 via-violet-50 to-blue-50 dark:from-indigo-950/30 dark:via-violet-950/30 dark:to-blue-950/30;
+  }
+  .gradient-text {
+    @apply bg-gradient-to-r from-indigo-600 via-violet-600 to-blue-600 bg-clip-text text-transparent;
   }
 }

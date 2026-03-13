@@ -17,9 +17,9 @@ export default function MemoryPage() {
   useEffect(() => {
     Promise.all([getEpisodicMemory(), getProceduralMemory(), getSemanticMemory()])
       .then(([ep, proc, sem]) => {
-        setEpisodic(ep);
-        setProcedural(proc);
-        setSemantic(sem);
+        setEpisodic(ep as typeof episodic);
+        setProcedural(proc as typeof procedural);
+        setSemantic(sem as typeof semantic);
       })
       .catch(console.error)
       .finally(() => setLoading(false));

@@ -20,10 +20,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} font-sans antialiased bg-[#f8f9fb] text-gray-900`}>
-        <div className="flex h-screen">
+      <body className={`${inter.variable} font-sans antialiased text-gray-900 bg-[#f4f6fc] dark:bg-gray-950`}>
+        <div className="flex h-screen overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-indigo-50/40 via-transparent to-violet-50/30 dark:from-indigo-950/20 dark:via-transparent dark:to-violet-950/20 pointer-events-none" aria-hidden />
           <Sidebar />
-          <main className="flex-1 overflow-auto">{children}</main>
+          <main className="flex-1 overflow-auto relative">{children}</main>
         </div>
       </body>
     </html>
