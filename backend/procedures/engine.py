@@ -138,11 +138,21 @@ def _run_custom_steps(procedure: dict, params: dict) -> list:
     return results
 
 
-def _get_step_sql(procedure: dict, step_action: str, default_sql: str) -> str:
-    """Get SQL from a procedure step by action name, falling back to default."""
+def _get_step_sql(procedure: dict, step_action: str, default_sql: str, subs: dict = None) -> str:
+    """Get SQL from a procedure step by action name, falling back to default.
+
+    If a matching step is found in the procedure JSON, any ``{placeholder}``
+    tokens in its SQL are replaced using *subs* before the SQL is returned.
+    This prevents DuckDB parser errors caused by unresolved template variables
+    (e.g. ``WHERE {filter}``) that were left in the stored procedure steps.
+    """
     for step in procedure.get("steps", []):
         if step.get("action") == "query" and step_action in step.get("description", "").lower():
-            return step.get("sql", default_sql)
+            sql = step.get("sql", default_sql)
+            if subs:
+                for k, v in subs.items():
+                    sql = sql.replace(f"{{{k}}}", str(v))
+            return sql
     return default_sql
 
 
@@ -304,7 +314,7 @@ def _execute_quality_audit(procedure: dict, params: dict) -> dict:
         GROUP BY CNT_STATE, ORG_NM
         ORDER BY quality_score ASC
         LIMIT 50
-    """)
+    """, subs={"filter": where, "where": where})
     stats_df = query(stats_sql)
 
     # ── 2. Per-stage RED flag counts per org ──
@@ -325,7 +335,7 @@ def _execute_quality_audit(procedure: dict, params: dict) -> dict:
         GROUP BY CNT_STATE, ORG_NM
         ORDER BY total_red_flags DESC
         LIMIT 50
-    """)
+    """, subs={"filter": where, "where": where})
     red_df = query(red_sql)
 
     # ── 3. Failure breakdown by status + category ──
@@ -456,7 +466,7 @@ def _execute_market_report(procedure: dict, params: dict) -> dict:
                NEXT_ITER_SCS_CNT, NEXT_ITER_FAIL_CNT,
                OVERALL_SCS_CNT, OVERALL_FAIL_CNT
         FROM metrics WHERE MARKET = '{market}' ORDER BY MONTH
-    """)
+    """, subs={"market": market, "state": market})
     market_df = query(trend_sql)
 
     file_stats_df = query(f"""

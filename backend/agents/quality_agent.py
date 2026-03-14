@@ -32,13 +32,15 @@ QUALITY_TOOL_DECLARATIONS = [
                     "Run a quality diagnostic procedure. Available: "
                     "record_quality_audit (failure rates by state/org, flags above threshold), "
                     "market_health_report (correlate SCS% with file failures — requires market param), "
-                    "retry_effectiveness_analysis (compare first-pass vs retry success rates)."
+                    "retry_effectiveness_analysis (compare first-pass vs retry success rates), "
+                    "trace_root_cause (deep root cause analysis — traces low SCS% back through stages, source systems, LOBs; use for 'why', 'root cause', 'diagnose' queries; accepts state/market param), "
+                    "rejection_pattern_clustering (cluster failures by type × org × LOB × source system — use for 'cluster', 'pattern', 'systemic' queries)."
                 ),
                 parameters=genai.protos.Schema(
                     type=genai.protos.Type.OBJECT,
                     properties={
-                        "procedure_name": genai.protos.Schema(type=genai.protos.Type.STRING, description="record_quality_audit | market_health_report | retry_effectiveness_analysis"),
-                        "params": genai.protos.Schema(type=genai.protos.Type.STRING, description="JSON params e.g. {\"state\": \"TN\", \"market\": \"New York\"}"),
+                        "procedure_name": genai.protos.Schema(type=genai.protos.Type.STRING, description="record_quality_audit | market_health_report | retry_effectiveness_analysis | trace_root_cause | rejection_pattern_clustering"),
+                        "params": genai.protos.Schema(type=genai.protos.Type.STRING, description="JSON params e.g. {\"state\": \"NY\"} or {\"market\": \"NY\"}"),
                     },
                     required=["procedure_name"],
                 ),

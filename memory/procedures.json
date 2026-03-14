@@ -108,6 +108,12 @@
         "params": {},
         "outcome": "unresolved",
         "session_id": "c538d90f-d41b-42b0-b288-47bb1567d2c9"
+      },
+      {
+        "timestamp": "2026-03-14T11:50:30.567986",
+        "params": {},
+        "outcome": "unresolved",
+        "session_id": "c100f374-e401-4d9f-a980-43b0c9eb8537"
       }
     ]
   },
@@ -297,6 +303,14 @@
         },
         "outcome": "informational",
         "session_id": "de468836-dcd2-45db-850e-f7ea8bdd5c8d"
+      },
+      {
+        "timestamp": "2026-03-14T11:50:59.586689",
+        "params": {
+          "market": "NY"
+        },
+        "outcome": "informational",
+        "session_id": "c100f374-e401-4d9f-a980-43b0c9eb8537"
       }
     ]
   },
@@ -505,6 +519,22 @@
         },
         "outcome": "informational",
         "session_id": "a961f519-551d-43a1-b35e-f401849235f2"
+      },
+      {
+        "timestamp": "2026-03-14T12:18:47.175661",
+        "params": {
+          "market": "NH"
+        },
+        "outcome": "informational",
+        "session_id": "dfda0f2c-ede4-4f9d-bfd3-5d180b3bfbd5"
+      },
+      {
+        "timestamp": "2026-03-14T12:18:52.283682",
+        "params": {
+          "state": "NY"
+        },
+        "outcome": "informational",
+        "session_id": "dfda0f2c-ede4-4f9d-bfd3-5d180b3bfbd5"
       }
     ]
   },

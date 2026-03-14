@@ -202,7 +202,7 @@ class SupervisorAgent:
         if intent == "triage":
             agent_name = "pipeline_agent"
             llm_result = await self.pipeline_agent.handle(user_query, tool_executor, episodic_context)
-        elif intent in ("audit", "report", "analysis"):
+        elif intent in ("audit", "report", "analysis", "root_cause", "clustering"):
             agent_name = "quality_agent"
             llm_result = await self.quality_agent.handle(user_query, tool_executor, episodic_context)
         elif self.pipeline:
@@ -332,11 +332,15 @@ class SupervisorAgent:
             if p.replace("_", " ") in query.lower() or p in query.lower():
                 procedures.append(p)
 
-        # Infer intent
+        # Infer intent — root_cause checked first so "root cause" beats "market"/"rejection"
         intent = "general"
         q_lower = query.lower()
         if any(w in q_lower for w in ["stuck", "triage", "critical", "stalled"]):
             intent = "triage"
+        elif any(w in q_lower for w in ["root cause", "root_cause", "trace root", "causal chain", "why is", "what caused", "diagnose", "trace_root_cause"]):
+            intent = "root_cause"
+        elif any(w in q_lower for w in ["cluster", "pattern cluster", "rejection_pattern", "rejection pattern"]):
+            intent = "clustering"
         elif any(w in q_lower for w in ["quality", "audit", "failure rate", "rejection"]):
             intent = "audit"
         elif any(w in q_lower for w in ["market", "scs", "success rate", "trend"]):
