@@ -1,11 +1,8 @@
 # RosterIQ — AI-Powered Healthcare Roster Pipeline Intelligence
 
-RosterIQ is an AI agent that monitors, diagnoses, and explains healthcare provider roster processing pipelines. It combines structured SQL analytics with semantic retrieval, three-tier memory architecture, and LLM-driven reasoning to surface stuck ROs, failing markets, retry inefficiencies, and compliance risks — then remembers what it found for next time.
+RosterIQ is a conversational AI agent that monitors, diagnoses, and explains healthcare provider roster processing pipelines. It combines sub-millisecond DuckDB analytics, a three-tier cognitive memory system, Gemini 2.5 Flash function-calling, and an adaptive procedural playbook to surface stuck ROs, failing markets, retry inefficiencies, and compliance risks — and **remembers what it found** so every future query builds on past investigations.
 
-
-**Team Name:**  Zopita  , **Team Members:**   [Pradipta Sundar Sahoo](https://github.com/Pradipta-Sundar-Sahoo)  , [Dhruv Khandelwal](https://github.com/dhruv-k1)
-
-
+**Team:** Zopita &nbsp;|&nbsp; [Pradipta Sundar Sahoo](https://github.com/Pradipta-Sundar-Sahoo) &nbsp;·&nbsp; [Dhruv Khandelwal](https://github.com/dhruv-k1)
 
 ---
 
@@ -13,42 +10,48 @@ RosterIQ is an AI agent that monitors, diagnoses, and explains healthcare provid
 
 - [Problem Statement](#problem-statement)
 - [Architecture Overview](#architecture-overview)
+- [Agent Routing](#agent-routing)
 - [Agent Tools](#agent-tools)
 - [Data Preprocessing Pipeline](#data-preprocessing-pipeline)
+- [Enriched Data Model](#enriched-data-model)
+- [DuckDB Tables](#duckdb-tables)
 - [Three-Tier Memory System](#three-tier-memory-system)
+- [Diagnostic Procedures](#diagnostic-procedures)
 - [Multi-Path Query Pipeline](#multi-path-query-pipeline)
+- [Visualization Engine](#visualization-engine)
+- [Root Cause Reasoning](#root-cause-reasoning)
+- [Procedural Learning Visibility](#procedural-learning-visibility)
 - [Key Design Decisions](#key-design-decisions)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
 - [API Reference](#api-reference)
 - [Frontend Pages](#frontend-pages)
+- [Getting Started](#getting-started)
 
 ---
 
 ## Problem Statement
 
-Healthcare payers receive thousands of provider roster files monthly from different source systems (AvailityPDM, DPE, PDM, etc.). Each file passes through a **7-stage processing pipeline**:
+Healthcare payers receive thousands of provider roster files monthly from source systems (AvailityPDM, DPE, PDM, MedEnroll, etc.). Each file passes through a **7-stage processing pipeline**:
 
 ```
-INGESTION → PRE_PROCESSING → MAPPING_APPROVAL → ISF_GENERATION → DART_GENERATION → DART_REVIEW → DART_UI_VALIDATION → SPS_LOAD → RESOLVED
+PRE_PROCESSING → MAPPING_APPROVAL → ISF_GENERATION → DART_GENERATION → DART_REVIEW → DART_UI_VALIDATION → SPS_LOAD
 ```
 
-Files can get **stuck**, **fail validation**, or **degrade market SCS%** (Success Rate). Operators need to:
-- Triage stuck ROs by priority
-- Identify root causes of failures (data quality? compliance? timeout?)
-- Track market health trends over time
-- Understand retry effectiveness
-- Correlate failures with LOB type (Medicare HMO vs Commercial PPO)
-- Remember past investigations to avoid redundant work
+Files can get **stuck**, **fail validation**, or **degrade market SCS%** (Transaction Success Rate). Operators need to:
 
-RosterIQ automates all of this through conversational AI with persistent memory.
+- Triage stuck ROs by priority (critical / high / medium / low)
+- Identify root causes of failures (data quality? compliance? timeout? source system?)
+- Track market health trends across months
+- Understand retry effectiveness (does re-processing actually fix things?)
+- Correlate failures with LOB type (Medicare HMO vs Commercial PPO vs Medicaid FFS)
+- Remember past investigations to avoid redundant diagnostic work
+
+RosterIQ automates all of this through conversational AI with persistent memory, statistical root cause reasoning, and versioned playbooks that improve over time.
 
 ---
 
 ## Architecture Overview
-
-### High-Level Architecture (Mermaid)
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#DBEAFE', 'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'lineColor': '#6B7280', 'textColor': '#1F2937'}}}%%
@@ -65,7 +68,7 @@ graph TB
         PipelineAgent["Pipeline Agent<br/>(Triage / Health)"]
         QualityAgent["Quality Agent<br/>(Failures / Metrics)"]
         Formatter["Formatter Agent"]
-        LLMProvider["LLM Provider<br/>(Gemini 2.5 Flash)"]
+        LLMProvider["Gemini 2.5 Flash"]
     end
 
     subgraph Memory["Three-Tier Memory"]
@@ -85,8 +88,8 @@ graph TB
     end
 
     subgraph Data["Data Layer"]
-        DuckDB["DuckDB (In-Memory)"]
-        ChromaDB["ChromaDB (Vector Store)"]
+        DuckDB["DuckDB (In-Memory)<br/>roster · metrics · state_summary<br/>org_summary · stage_health_summary"]
+        ChromaDB["ChromaDB (Vector Store)<br/>3 collections"]
         Tavily["Tavily Web Search"]
     end
 
@@ -108,8 +111,6 @@ graph TB
     Supervisor --> Episodic
     Supervisor --> Procedural
     Supervisor --> Semantic
-    Pipeline --> ChromaDB
-    Pipeline --> Episodic
 
     PipelineAgent --> T1
     PipelineAgent --> T3
@@ -119,7 +120,6 @@ graph TB
     QualityAgent --> T3
     QualityAgent --> T4
     QualityAgent --> T7
-    Pipeline --> T1
     Supervisor --> T1
     Supervisor --> T2
     Supervisor --> T3
@@ -135,8 +135,6 @@ graph TB
     T6 --> Procedural
     T7 --> Semantic
 
-    Supervisor --> DuckDB
-    Supervisor --> Tavily
     CSV1 --> DuckDB
     CSV2 --> DuckDB
     Semantic --> ChromaDB
@@ -147,235 +145,200 @@ graph TB
     style Tools fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
     style Data fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
     style DataSources fill:#FEE2E2,stroke:#EF4444,stroke-width:2px,color:#7F1D1D
-
-    style Chat fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style Dashboard fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style MemoryUI fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-
-    style Supervisor fill:#FDE68A,stroke:#D97706,color:#78350F
-    style Pipeline fill:#FDE68A,stroke:#D97706,color:#78350F
-    style PipelineAgent fill:#FDE68A,stroke:#D97706,color:#78350F
-    style QualityAgent fill:#FDE68A,stroke:#D97706,color:#78350F
-    style Formatter fill:#FDE68A,stroke:#D97706,color:#78350F
-    style LLMProvider fill:#FBBF24,stroke:#B45309,color:#78350F
-
-    style Episodic fill:#6EE7B7,stroke:#059669,color:#065F46
-    style Procedural fill:#6EE7B7,stroke:#059669,color:#065F46
-    style Semantic fill:#6EE7B7,stroke:#059669,color:#065F46
-
-    style T1 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T2 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T3 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T4 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T5 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T6 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style T7 fill:#E0E7FF,stroke:#6366F1,color:#312E81
-
-    style DuckDB fill:#C4B5FD,stroke:#7C3AED,color:#4C1D95
-    style ChromaDB fill:#C4B5FD,stroke:#7C3AED,color:#4C1D95
-    style Tavily fill:#C4B5FD,stroke:#7C3AED,color:#4C1D95
-
-    style CSV1 fill:#FCA5A5,stroke:#DC2626,color:#7F1D1D
-    style CSV2 fill:#FCA5A5,stroke:#DC2626,color:#7F1D1D
 ```
 
-### Agent Routing (Mermaid)
+---
+
+## Agent Routing
+
+Every incoming message passes through the Supervisor, which uses regex entity extraction and keyword-based intent detection to route the request to the most appropriate specialist.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#DBEAFE', 'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'lineColor': '#6B7280', 'textColor': '#1F2937'}}}%%
 flowchart LR
     Query["User Query"] --> Supervisor["Supervisor"]
-    Supervisor --> Extract["Entity Extraction<br/>(Regex)"]
+    Supervisor --> Extract["Entity Extraction<br/>(Regex &lt;1ms)<br/>states · RO IDs · procedures"]
     Extract --> Intent{"Intent?"}
 
-    Intent -->|triage / stuck| PA["Pipeline Agent"]
-    Intent -->|audit / report / analysis| QA["Quality Agent"]
+    Intent -->|triage / stuck / critical| PA["Pipeline Agent"]
+    Intent -->|audit / report / analysis / quality| QA["Quality Agent"]
+    Intent -->|memory / before / history / past| RM["recall_memory"]
+    Intent -->|update / modify / add to procedure| UP["update_procedure"]
     Intent -->|general / other| QP["Query Pipeline"]
 
     PA --> PATools["Tools: query_data, run_procedure, create_chart"]
-    QA --> QATools["Tools: query_data, run_procedure, create_chart, web_search, update_semantic_knowledge"]
-    QP --> Classify["Classify Paths"]
+    QA --> QATools["Tools: query_data, run_procedure, create_chart,<br/>web_search, update_semantic_knowledge"]
+    QP --> Classify["LLM Classifier<br/>(paths: sql, vector, history)"]
 
     Classify --> SQL["SQL Path"]
-    Classify --> Vector["Vector Path"]
-    Classify --> History["History Path"]
+    Classify --> Vector["Vector Path (ChromaDB)"]
+    Classify --> History["History Path (Episodic)"]
 
     SQL --> Combine["Combine Contexts"]
     Vector --> Combine
     History --> Combine
 
-    Combine --> Judge{"Sufficient?"}
-    Judge -->|No| Refine["Refine<br/>(up to 3 loops)"]
+    Combine --> Judge{"Sufficiency<br/>Judge (LLM)"}
+    Judge -->|No, up to 3x| Refine["Refinement Loop"]
     Refine --> Judge
     Judge -->|Yes| Generate["Generate Response"]
 
     PATools --> Format["Formatter Agent"]
     QATools --> Format
     Generate --> Format
-    Format --> Response["Final Response<br/>+ Charts + Memory Update"]
+    Format --> Response["Final Response + Charts + Memory Updates"]
 
     style Query fill:#DBEAFE,stroke:#3B82F6,stroke-width:2px,color:#1E3A5F
     style Supervisor fill:#FDE68A,stroke:#D97706,stroke-width:2px,color:#78350F
     style Extract fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
     style Intent fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
-
     style PA fill:#FECACA,stroke:#EF4444,stroke-width:2px,color:#7F1D1D
     style QA fill:#FED7AA,stroke:#F97316,stroke-width:2px,color:#7C2D12
     style QP fill:#FDE68A,stroke:#EAB308,stroke-width:2px,color:#713F12
-
+    style RM fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
+    style UP fill:#D1FAE5,stroke:#10B981,stroke-width:2px,color:#065F46
     style PATools fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
     style QATools fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
-    style Classify fill:#FEF9C3,stroke:#CA8A04,stroke-width:2px,color:#713F12
-
-    style SQL fill:#CFFAFE,stroke:#06B6D4,stroke-width:2px,color:#164E63
-    style Vector fill:#D1FAE5,stroke:#10B981,stroke-width:2px,color:#065F46
-    style History fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
-
-    style Combine fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
-    style Judge fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
-    style Refine fill:#FECACA,stroke:#EF4444,stroke-width:2px,color:#7F1D1D
-    style Generate fill:#BBF7D0,stroke:#22C55E,stroke-width:2px,color:#14532D
     style Format fill:#FDE68A,stroke:#EAB308,stroke-width:2px,color:#713F12
     style Response fill:#86EFAC,stroke:#16A34A,stroke-width:2px,color:#14532D
 ```
 
-### Agent Tools
+---
 
-| Tool | Purpose | Used By |
-|------|---------|---------|
-| `query_data` | Execute DuckDB SQL (with self-correction) | Pipeline Agent, Quality Agent, Query Pipeline, Supervisor |
-| `web_search` | Search web for regulatory, org, compliance context | Quality Agent, Supervisor |
-| `run_procedure` | Run diagnostic procedure (triage, audit, market health, etc.) | Pipeline Agent, Quality Agent, Supervisor |
-| `create_chart` | Generate Plotly chart (heatmap, trend, breakdown, stuck tracker, etc.) | Pipeline Agent, Quality Agent, Supervisor |
-| `recall_memory` | Search episodic memory for past investigations | Supervisor |
-| `update_procedure` | Add or modify procedure steps from user feedback | Supervisor |
-| `update_semantic_knowledge` | Persist regulatory/compliance insights from web search | Quality Agent, Supervisor |
+## Agent Tools
+
+| Tool | Description | Parameters | Used By |
+|------|-------------|-----------|---------|
+| `query_data` | Execute a SELECT query on DuckDB with schema-aware self-correction (up to 3 retries) | `sql: string` | All agents |
+| `web_search` | Search the web for regulatory, org, or compliance context via Tavily | `query: string`, `search_type: regulatory\|org\|compliance\|lob\|general` | Quality Agent, Supervisor |
+| `run_procedure` | Execute a named diagnostic procedure from procedural memory | `procedure_name: string`, `params: JSON string` | All agents |
+| `create_chart` | Generate a Plotly chart JSON by type | `chart_type: string`, `params: JSON string` | All agents |
+| `recall_memory` | Semantic search over past episodic investigations | `search_text: string` | Supervisor |
+| `update_procedure` | Add steps or modify an existing procedure; version-tracked with change record | `procedure_name`, `change_description`, `new_step: JSON` | Supervisor |
+| `update_semantic_knowledge` | Persist new domain or regulatory knowledge to YAML + ChromaDB | `category`, `key`, `value`, `reason` | Quality Agent, Supervisor |
 
 ---
 
 ## Data Preprocessing Pipeline
 
-Raw CSVs are loaded into DuckDB at startup and enriched through a multi-step preprocessing pipeline.
-
-### Preprocessing Flow (Mermaid)
+Raw CSVs are loaded into DuckDB at server startup and transformed through a 4-step pipeline. All enriched columns are pre-computed so the LLM only needs to write simple `SELECT col FROM table WHERE col = value` queries rather than complex inline derivations.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#DBEAFE', 'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'lineColor': '#6B7280', 'textColor': '#1F2937'}}}%%
 flowchart TD
-    subgraph Raw["Step 1: Load Raw CSVs"]
+    subgraph Raw["Step 1 — Load Raw CSVs"]
         R1["roster_processing_details.csv → raw_roster"]
         R2["aggregated_operational_metrics.csv → raw_metrics"]
     end
 
-    subgraph Normalize["Step 2: Normalize & Standardize"]
+    subgraph Normalize["Step 2 — Normalize & Standardize"]
         N1["Column Renames<br/>AVG_DART_GENERATION_DURATION → AVG_DART_GEN_DURATION<br/>AVG_ISF_GENERATION_DURATION → AVG_ISF_GEN_DURATION<br/>AVG_DART_UI_VLDTN_DURATION → AVG_DART_UI_VALIDATION_DURATION"]
-        N2["Categorical Normalization<br/>Health flags → UPPERCASE<br/>FAILURE_STATUS → UPPER + TRIM<br/>Stage names: DART_GENERATION → DART_GEN"]
+        N2["Categorical Normalization<br/>All health flags → UPPERCASE<br/>FAILURE_STATUS → UPPER + TRIM<br/>Stage name: DART_GENERATION → DART_GEN"]
         N3["Type Casting<br/>FILE_STATUS_CD → INTEGER"]
     end
 
-    subgraph Enrich["Step 3: Feature Engineering"]
-        E1["Priority Scoring<br/>CRITICAL: DAYS_STUCK > 90 AND RED_COUNT >= 2<br/>HIGH: DAYS_STUCK > 30 OR RED_COUNT >= 2<br/>MEDIUM: DAYS_STUCK > 7<br/>LOW: everything else"]
-        E2["LOB Decomposition<br/>LOB_PRIMARY, LOB_CATEGORIES, LOB_COUNT<br/>LOB_PLAN_TYPE (HMO/PPO/EPO/FFS/MIXED)<br/>LOB_COMPLIANCE_RISK (HIGHEST→LOW)<br/>HAS_MEDICARE, HAS_MEDICAID, HAS_COMMERCIAL"]
-        E3["Failure Classification<br/>FAILURE_CATEGORY:<br/>VALIDATION / TIMEOUT / PROCESSING<br/>COMPLIANCE / OTHER / NONE"]
-        E4["Health Aggregation<br/>RED_COUNT, YELLOW_COUNT across 7 stages<br/>HEALTH_SCORE (GREEN=2, YELLOW=1, RED=0)<br/>WORST_HEALTH_STAGE (first RED stage)"]
-        E5["Pipeline Ordering<br/>PIPELINE_STAGE_ORDER: PRE_PROCESSING=0 → SPS_LOAD=6"]
-        E6["Metrics Enrichment<br/>RETRY_LIFT_PCT, OVERALL_FAIL_RATE<br/>FIRST_ITER_FAIL_RATE, IS_BELOW_SLA<br/>MONTH_DATE (parsed from MM-YYYY)"]
+    subgraph Enrich["Step 3 — Feature Engineering (15+ columns)"]
+        E1["Triage Priority<br/>CRITICAL: DAYS_STUCK > 90 AND RED_COUNT ≥ 2<br/>HIGH: DAYS_STUCK > 30 OR RED_COUNT ≥ 2<br/>MEDIUM: DAYS_STUCK > 7<br/>LOW: everything else"]
+        E2["LOB Decomposition<br/>LOB_PRIMARY · LOB_CATEGORIES · LOB_COUNT<br/>LOB_PLAN_TYPE (HMO/PPO/EPO/FFS/INDEMNITY/UNSPECIFIED)<br/>LOB_COMPLIANCE_RISK (HIGHEST → LOW)<br/>HAS_MEDICARE · HAS_MEDICAID · HAS_COMMERCIAL"]
+        E3["Failure Classification<br/>FAILURE_CATEGORY:<br/>NONE / VALIDATION / TIMEOUT<br/>PROCESSING / COMPLIANCE / OTHER"]
+        E4["Health Aggregation<br/>RED_COUNT · YELLOW_COUNT (0–7 each)<br/>HEALTH_SCORE (GREEN=2, YELLOW=1, RED=0, max=14)<br/>WORST_HEALTH_STAGE (last-stage-first RED scan)"]
+        E5["Pipeline Ordering<br/>PIPELINE_STAGE_ORDER: –2 (INGESTION) to 7 (RESOLVED)"]
+        E6["Metrics Enrichment<br/>RETRY_LIFT_PCT · OVERALL_FAIL_RATE<br/>FIRST_ITER_FAIL_RATE · RETRY_RESOLUTION_RATE<br/>TOT_REC_CNT · SCS/FAIL/REJ_REC_RATIO<br/>IS_BELOW_SLA · MONTH_DATE"]
     end
 
-    subgraph Summary["Step 4: Summary Tables"]
-        S1["state_summary<br/>Per-state: total ROs, stuck, failed,<br/>failure rate, avg days stuck,<br/>critical count, top failing org"]
-        S2["org_summary<br/>Per (org, state): total ROs, stuck,<br/>failed, failure rate, health score"]
-        S3["stage_health_summary<br/>Per pipeline stage: RED/YELLOW/GREEN<br/>counts, stuck-in-stage count"]
+    subgraph Summary["Step 4 — Aggregate Summary Tables"]
+        S1["state_summary<br/>Per CNT_STATE: TOTAL_ROS, STUCK_COUNT, FAILED_COUNT,<br/>FAILURE_RATE, AVG_DAYS_STUCK, CRITICAL_COUNT,<br/>AVG_RED_COUNT, AVG_HEALTH_SCORE, TOP_FAILING_ORG"]
+        S2["org_summary<br/>Per (ORG_NM, CNT_STATE): TOTAL_ROS, STUCK_COUNT,<br/>FAILED_COUNT, FAILURE_RATE, AVG_HEALTH_SCORE, CRITICAL_COUNT"]
+        S3["stage_health_summary<br/>Per LATEST_STAGE_NM: RED/YELLOW/GREEN totals,<br/>AVG_RED_FLAGS, STUCK_IN_STAGE"]
     end
 
     Raw --> Normalize --> Enrich --> Summary
-
-    Summary --> Schema["Build Schema Cache<br/>(for LLM prompt injection)"]
-    Summary --> VectorIndex["Index into ChromaDB<br/>(roster_profiles collection)"]
+    Summary --> Schema["Build Schema Cache<br/>(for dynamic LLM prompt injection)"]
+    Summary --> VectorIndex["Index org profiles into ChromaDB<br/>(roster_profiles collection)"]
 
     style Raw fill:#FEE2E2,stroke:#EF4444,stroke-width:2px,color:#7F1D1D
     style Normalize fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
     style Enrich fill:#DBEAFE,stroke:#3B82F6,stroke-width:2px,color:#1E3A5F
     style Summary fill:#D1FAE5,stroke:#10B981,stroke-width:2px,color:#065F46
-
-    style R1 fill:#FCA5A5,stroke:#DC2626,color:#7F1D1D
-    style R2 fill:#FCA5A5,stroke:#DC2626,color:#7F1D1D
-
-    style N1 fill:#FDE68A,stroke:#D97706,color:#78350F
-    style N2 fill:#FDE68A,stroke:#D97706,color:#78350F
-    style N3 fill:#FDE68A,stroke:#D97706,color:#78350F
-
-    style E1 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style E2 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style E3 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style E4 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style E5 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style E6 fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-
-    style S1 fill:#6EE7B7,stroke:#059669,color:#065F46
-    style S2 fill:#6EE7B7,stroke:#059669,color:#065F46
-    style S3 fill:#6EE7B7,stroke:#059669,color:#065F46
-
     style Schema fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
     style VectorIndex fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
 ```
 
-### What Each Enriched Column Means
+---
 
-| Column | Source Logic | Purpose |
+## Enriched Data Model
+
+### roster table (individual RO records)
+
+| Column | Derived From | Meaning |
 |--------|-------------|---------|
-| `PRIORITY` | `DAYS_STUCK` + `RED_COUNT` thresholds | Triage ranking for stuck ROs |
-| `IS_RETRY` | `RUN_NO > 1` | Identify reprocessed files |
-| `LOB_PRIMARY` | First token of comma-split LOB | Quick LOB categorization |
-| `LOB_PLAN_TYPE` | Pattern match HMO/PPO/EPO/FFS | Plan structure classification |
-| `LOB_COMPLIANCE_RISK` | Medicare HMO = HIGHEST, Commercial = LOW | Regulatory risk ranking |
-| `FAILURE_CATEGORY` | Keyword match on `FAILURE_STATUS` | Structured failure taxonomy |
-| `RED_COUNT` | Sum of RED health flags across 7 stages | Stage-level problem density |
-| `HEALTH_SCORE` | GREEN=2, YELLOW=1, RED=0, summed | Overall health ranking (0-14) |
-| `WORST_HEALTH_STAGE` | First RED stage (end-of-pipeline first) | Bottleneck identification |
-| `PIPELINE_STAGE_ORDER` | Ordinal 0-7 | Enables stage progression analysis |
-| `RETRY_LIFT_PCT` | `(NEXT_ITER - FIRST_ITER) / FIRST_ITER × 100` | Retry effectiveness measure |
-| `IS_BELOW_SLA` | `SCS_PERCENT < 95` | SLA violation flag |
+| `DAYS_STUCK` | `DATEDIFF('day', FILE_RECEIVED_DT, NOW())` | Age of unresolved file |
+| `RED_COUNT` | Sum of 7 health flags = RED | Number of failed pipeline stages |
+| `YELLOW_COUNT` | Sum of 7 health flags = YELLOW | Number of warning stages |
+| `HEALTH_SCORE` | GREEN=2, YELLOW=1, RED=0 per flag, summed | Overall health (0–14, 14=fully green) |
+| `PRIORITY` | `DAYS_STUCK` + `RED_COUNT` thresholds | Triage rank: CRITICAL / HIGH / MEDIUM / LOW |
+| `IS_RETRY` | `RUN_NO > 1` | Whether this is a reprocessing attempt |
+| `LOB_PRIMARY` | First token of LOB list | Quick LOB lookup |
+| `LOB_PLAN_TYPE` | Pattern match: HMO / PPO / EPO / FFS / INDEMNITY | Plan structure classification |
+| `LOB_COMPLIANCE_RISK` | Medicare HMO=HIGHEST → Commercial=LOW | Regulatory risk tier |
+| `FAILURE_CATEGORY` | Keyword match on FAILURE_STATUS | Structured taxonomy for root cause |
+| `WORST_HEALTH_STAGE` | First RED stage (scanned SPS_LOAD → PRE_PROCESSING) | Bottleneck stage |
+| `PIPELINE_STAGE_ORDER` | Stage name → integer –2 to 7 | Enables stage-progression queries |
+
+### metrics table (market-level monthly aggregates)
+
+| Column | Derived From | Meaning |
+|--------|-------------|---------|
+| `RETRY_LIFT_PCT` | `(NEXT_ITER_SCS – FIRST_ITER_SCS) / FIRST_ITER_SCS × 100` | How much retrying improved success rate |
+| `RETRY_RESOLUTION_RATE` | `(NEXT_ITER_SCS – FIRST_ITER_SCS) / FIRST_ITER_FAIL × 100` | % of first-iteration failures recovered by retry |
+| `TOT_REC_CNT` | `OVERALL_SCS + OVERALL_FAIL` | Total records processed |
+| `SCS_REC_RATIO` | `OVERALL_SCS / TOT_REC_CNT × 100` | Overall success rate |
+| `FAIL_REC_RATIO` | `OVERALL_FAIL / TOT_REC_CNT × 100` | Overall failure rate |
+| `IS_BELOW_SLA` | `SCS_PERCENT < 95` | SLA breach flag (95% threshold) |
+| `MONTH_DATE` | `STRPTIME(MONTH, '%m-%Y')` | Sortable timestamp from MM-YYYY string |
+
+### Summary tables
+
+| Table | Granularity | Key Metrics |
+|-------|------------|------------|
+| `state_summary` | Per state | TOTAL_ROS, STUCK_COUNT, FAILED_COUNT, FAILURE_RATE, AVG_DAYS_STUCK, CRITICAL_COUNT, TOP_FAILING_ORG |
+| `org_summary` | Per org × state | TOTAL_ROS, STUCK_COUNT, FAILED_COUNT, FAILURE_RATE, AVG_HEALTH_SCORE, CRITICAL_COUNT |
+| `stage_health_summary` | Per pipeline stage | RED_COUNT_TOTAL, YELLOW_COUNT_TOTAL, AVG_RED_FLAGS, STUCK_IN_STAGE |
 
 ---
 
 ## Three-Tier Memory System
 
-RosterIQ implements a **cognitive memory architecture** inspired by human memory systems. Each tier serves a distinct purpose and improves output quality over time.
-
-### Memory Architecture (Mermaid)
+RosterIQ implements a **cognitive memory architecture** inspired by human memory. Each tier serves a distinct purpose and improves quality over time.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#DBEAFE', 'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'lineColor': '#6B7280', 'textColor': '#1F2937'}}}%%
 graph TB
-    subgraph Episodic["Episodic Memory (SQLite)"]
-        direction TB
-        EP_Store["episodes table<br/>query, intent, entities, findings,<br/>tools_used, procedure_used,<br/>data_snapshot, embedding, importance_score"]
-        EP_Changes["state_changes table<br/>entity_type, entity_id, field,<br/>old_value → new_value"]
-        EP_Digest["episode_digests table<br/>Consolidated summaries of<br/>old episodes (30+ days)"]
-        EP_Search["Semantic Search<br/>Gemini text-embedding-004<br/>cosine_similarity × 0.7 + importance × 0.3"]
+    subgraph Episodic["Episodic Memory (SQLite + Gemini Embeddings)"]
+        EP_Store["episodes table<br/>query · intent · entities_json<br/>findings_summary · tools_used · procedure_used<br/>data_snapshot_json · embedding_json · importance_score"]
+        EP_Changes["state_changes table<br/>entity_type · entity_id · field<br/>old_value → new_value"]
+        EP_Digest["episode_digests table<br/>Consolidated summaries of<br/>episodes older than 30 days"]
+        EP_Search["Semantic Ranking<br/>score = cosine_similarity × 0.7 + importance × 0.3"]
     end
 
-    subgraph Procedural["Procedural Memory (JSON)"]
-        direction TB
-        PR_Procs["Versioned Procedures<br/>triage_stuck_ros, record_quality_audit,<br/>market_health_report,<br/>retry_effectiveness_analysis,<br/>trace_root_cause,<br/>rejection_pattern_clustering"]
-        PR_Log["Execution Log<br/>outcome: resolved / unresolved /<br/>escalated / informational"]
-        PR_Eff["Effectiveness Tracking<br/>resolved_rate = resolved / total_runs"]
+    subgraph Procedural["Procedural Memory (JSON — procedures.json)"]
+        PR_Procs["7 Versioned Procedures<br/>triage_stuck_ros · record_quality_audit<br/>market_health_report · retry_effectiveness_analysis<br/>generate_pipeline_health_report<br/>trace_root_cause · rejection_pattern_clustering"]
+        PR_Log["Execution Log (rolling 50)<br/>outcome: resolved / unresolved / escalated / informational"]
+        PR_Eff["Effectiveness Tracking<br/>resolved_rate = resolved / total_runs (%)"]
     end
 
-    subgraph Semantic["Semantic Memory (YAML)"]
-        direction TB
-        SM_Domain["Domain Knowledge<br/>Pipeline stages, failure statuses,<br/>LOB meanings, health flags,<br/>source systems, status codes"]
-        SM_Reg["Regulatory Knowledge<br/>CMS rulings, state Medicaid<br/>policy changes (learned via web search)"]
-        SM_Cross["Cross-Table Relationships<br/>CNT_STATE ↔ MARKET mapping,<br/>RUN_NO ↔ retry counts"]
+    subgraph Semantic["Semantic Memory (YAML — semantic_knowledge.yaml)"]
+        SM_Domain["Static Domain Knowledge<br/>Pipeline stages · failure statuses<br/>LOB meanings · health flag definitions<br/>source systems · status codes"]
+        SM_Reg["Learned Regulatory Knowledge<br/>CMS rulings · state Medicaid policy changes<br/>(added at runtime via update_semantic_knowledge)"]
+        SM_Cross["Cross-Table Relationships<br/>CNT_STATE ↔ MARKET · RUN_NO ↔ retry counts<br/>FILE_STATUS_CD meanings"]
     end
 
     Query["User Query"] --> EP_Search
     Query --> PR_Procs
     Query --> SM_Domain
 
-    EP_Search -->|Past investigations| Context["Enriched Prompt Context"]
-    PR_Eff -->|Procedure effectiveness| Context
+    EP_Search -->|Matched past investigations| Context["Enriched Prompt Context"]
+    PR_Eff -->|Procedure effectiveness scores| Context
     SM_Domain -->|Domain definitions| Context
     SM_Reg -->|Regulatory context| Context
 
@@ -384,142 +347,104 @@ graph TB
     Response -->|Log findings| EP_Store
     Response -->|Detect changes| EP_Changes
     Response -->|Log outcome| PR_Log
-    Response -->|New knowledge from web| SM_Reg
+    Response -->|New web-sourced knowledge| SM_Reg
 
     style Episodic fill:#DBEAFE,stroke:#3B82F6,stroke-width:2px,color:#1E3A5F
     style Procedural fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
     style Semantic fill:#D1FAE5,stroke:#10B981,stroke-width:2px,color:#065F46
-
-    style EP_Store fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style EP_Changes fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style EP_Digest fill:#93C5FD,stroke:#2563EB,color:#1E3A5F
-    style EP_Search fill:#60A5FA,stroke:#1D4ED8,color:#FFFFFF
-
-    style PR_Procs fill:#FDE68A,stroke:#D97706,color:#78350F
-    style PR_Log fill:#FDE68A,stroke:#D97706,color:#78350F
-    style PR_Eff fill:#FBBF24,stroke:#B45309,color:#78350F
-
-    style SM_Domain fill:#6EE7B7,stroke:#059669,color:#065F46
-    style SM_Reg fill:#6EE7B7,stroke:#059669,color:#065F46
-    style SM_Cross fill:#6EE7B7,stroke:#059669,color:#065F46
-
-    style Query fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
     style Context fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
     style LLM fill:#FBBF24,stroke:#B45309,stroke-width:2px,color:#78350F
     style Response fill:#86EFAC,stroke:#16A34A,stroke-width:2px,color:#14532D
 ```
 
-### How Memory Improves Query Outputs
-
-#### 1. Episodic Memory — "What did we find before?"
+### Episodic Memory — "What did we find before?"
 
 | Mechanism | How It Helps |
 |-----------|-------------|
-| **Semantic search over past episodes** | When a user asks "What's happening in Texas?", the system finds past TX investigations using Gemini embeddings (cosine similarity × importance weighting), avoiding redundant SQL queries |
-| **Data snapshots** | Every episode stores a full state snapshot (stuck ROs by state, SCS% by market, top failing orgs). Session briefings compare current vs previous snapshots to detect changes ("3 stuck ROs resolved in TX since last session") |
-| **Importance scoring** | Episodes involving web searches, procedures, or critical findings score higher (0.0–1.0), ensuring important investigations surface first |
-| **Consolidation** | Episodes older than 30 days are LLM-summarized into digests, keeping search fast while retaining long-term patterns |
+| **Semantic search** | Query is embedded with Gemini `text-embedding-004`. Past episodes are ranked: `cosine_similarity × 0.7 + importance_score × 0.3`. Episodes involving web search, procedures, or critical findings get higher importance. |
+| **Data snapshots** | Every episode stores a full pipeline snapshot (stuck ROs by state, failed counts, top orgs). Session briefings compare current vs previous snapshot to surface changes ("3 stuck ROs resolved in TX since last session"). |
+| **State change detection** | Detects changes across `stuck_by_state`, `failed_by_state`, `red_flag_by_state`, `scs_percent_by_state`, `top_failing_org_by_state`. Changes are logged with `old_value → new_value` and a narrative description. |
+| **Consolidation** | Episodes older than 30 days are LLM-summarized into `episode_digests`, keeping search fast while retaining long-term patterns. |
 
-#### 2. Procedural Memory — "What workflow should I follow?"
-
-| Mechanism | How It Helps |
-|-----------|-------------|
-| **Versioned procedures** | Diagnostic playbooks (e.g., `triage_stuck_ros`) with step-by-step SQL queries and analysis logic. Users can modify steps, and the system tracks version history |
-| **Effectiveness tracking** | Each procedure execution is logged with outcome (resolved/unresolved/escalated). The system reports "triage_stuck_ros: 67% resolved over 12 runs" in the prompt, helping the LLM decide whether to recommend a procedure |
-| **User-editable steps** | Procedures evolve based on user feedback. If a user says "also check LOB compliance risk during triage", the system adds a step and increments the version |
-
-#### 3. Semantic Memory — "What does this term mean?"
+### Procedural Memory — "What workflow should I follow?"
 
 | Mechanism | How It Helps |
 |-----------|-------------|
-| **Domain knowledge injection** | Pipeline stage descriptions, failure status meanings, LOB compliance hierarchies, and source system info are injected into every LLM prompt. The model knows "RED health = duration >2x average" without being told each time |
-| **Runtime learning** | When web search discovers new regulatory info (e.g., "CMS CY 2026 changes"), the `update_semantic_knowledge` tool persists it to YAML. Future queries automatically include this context |
-| **Cross-table relationships** | Semantic memory stores how tables relate (CNT_STATE ↔ MARKET, RUN_NO ↔ retry attempts), reducing SQL errors |
+| **Versioned playbooks** | Each procedure has `version`, `steps`, `parameters`, `modification_history`, and `execution_log`. The LLM can read current version and full change history. |
+| **Effectiveness tracking** | `resolved_rate = resolved_count / total_runs`. Injected into the LLM prompt so it can recommend procedures that have historically worked. |
+| **Runtime learning** | When the user says "also check LOB compliance risk during triage", `update_procedure` adds the step and bumps the version. The UI shows exactly what changed and why (see [Procedural Learning Visibility](#procedural-learning-visibility)). |
 
-### Memory Interaction During a Query
+### Semantic Memory — "What does this term mean?"
 
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'actorBkg': '#DBEAFE', 'actorBorder': '#3B82F6', 'actorTextColor': '#1F2937', 'signalColor': '#6B7280', 'signalTextColor': '#1F2937', 'labelBoxBkgColor': '#F3F4F6', 'loopTextColor': '#1F2937', 'noteBkgColor': '#FEF3C7', 'noteTextColor': '#1F2937', 'sequenceNumberColor': '#FFFFFF'}}}%%
-sequenceDiagram
-    box rgb(219, 234, 254) User Interface
-        participant User
-    end
-    box rgb(254, 243, 199) Agent Layer
-        participant Supervisor
-    end
-    box rgb(209, 250, 229) Memory Tier
-        participant Episodic
-        participant Procedural
-        participant Semantic
-    end
-    box rgb(237, 233, 254) Data Layer
-        participant VectorDB as ChromaDB
-        participant LLM as Gemini 2.5 Flash
-        participant DuckDB
-    end
+| Mechanism | How It Helps |
+|-----------|-------------|
+| **Static domain injection** | Pipeline stage descriptions, health flag meanings, LOB compliance hierarchies, source system info — all injected into every LLM prompt. The model never needs to guess. |
+| **Runtime learning** | `update_semantic_knowledge` writes new entries to the YAML and re-indexes them in ChromaDB's `domain_knowledge` collection. Future queries automatically include this context. |
+| **Cross-table relationships** | Semantic memory stores how `roster.CNT_STATE` maps to `metrics.MARKET`, what `RUN_NO` means, etc. This significantly reduces LLM SQL join errors. |
 
-    User->>Supervisor: "Why is TX SCS% dropping?"
-    Supervisor->>Supervisor: Extract entities (states: [TX], intent: report)
+---
 
-    par Memory Retrieval
-        Supervisor->>Episodic: search_semantic("TX SCS% dropping")
-        Episodic-->>Supervisor: Past TX investigation from 2 days ago
-        Supervisor->>Procedural: get_effectiveness("market_health_report")
-        Procedural-->>Supervisor: 80% resolved over 5 runs
-        Supervisor->>Semantic: format_for_prompt()
-        Semantic-->>Supervisor: Domain knowledge + CMS 2026 rulings
-    end
+## Diagnostic Procedures
 
-    Supervisor->>LLM: Enriched prompt with all memory context
+Procedures are versioned playbooks stored in `memory/procedures.json`. The engine in `procedures/engine.py` dispatches each procedure to a dedicated Python executor.
 
-    LLM->>DuckDB: query_data(SQL for TX metrics)
-    DuckDB-->>LLM: SCS% trend data
-    LLM->>DuckDB: query_data(SQL for TX failures)
-    DuckDB-->>LLM: Failure breakdown
-    LLM->>Supervisor: Analysis with root cause
+| Procedure | Purpose | Key Output |
+|-----------|---------|-----------|
+| `triage_stuck_ros` | Find all stuck ROs ranked by `DAYS_STUCK + RED_COUNT`. Returns CRITICAL → LOW priority groups. | Stuck count, priority breakdown, stuck_tracker chart |
+| `record_quality_audit` | Failure rates per state and org. Flags states/orgs below configurable threshold. | Failure stats, flagged orgs list |
+| `market_health_report` | SCS% trends per market, correlation with file failure rates. | Market trend chart, below-SLA markets |
+| `retry_effectiveness_analysis` | Compare `FIRST_ITER_SCS_CNT` vs `NEXT_ITER_SCS_CNT`. Computes `RETRY_LIFT_PCT` per market. | Retry lift chart, markets where retrying doesn't help |
+| `generate_pipeline_health_report` | Full report: stage health heatmap, state summary, bottleneck analysis, recommended actions. | Health heatmap + state summary table |
+| `trace_root_cause` | Deep statistical root cause analysis — see [Root Cause Reasoning](#root-cause-reasoning). | Stage blame scores, driver scores, ranked causal chain |
+| `rejection_pattern_clustering` | Cluster failures by `FAILURE_CATEGORY × ORG_NM × LOB` to find systemic patterns. | Failure pattern table, top clusters |
 
-    par Memory Updates
-        Supervisor->>Episodic: log_episode(query, findings, snapshot)
-        Supervisor->>Episodic: detect_state_changes(prev vs current)
-        Supervisor->>VectorDB: index_episode(for future retrieval)
-    end
+### Procedure Execution Flow
 
-    Supervisor->>User: Response + charts + state change alerts
+```
+run_procedure(name, params)
+  ↓
+engine.execute_procedure(name, params)
+  ↓
+_execute_{name}()  [dedicated Python function]
+  ↓
+DuckDB queries + Python analytics
+  ↓
+Plotly chart generation
+  ↓
+{summary, data, chart, ...}
+  ↓
+log_execution(name, params, outcome, session_id)  [rolling 50 entries]
 ```
 
 ---
 
 ## Multi-Path Query Pipeline
 
-The query pipeline classifies each query and routes it through parallel retrieval paths before generating a response.
-
-### Pipeline Flow
+The query pipeline routes general queries through parallel retrieval, a sufficiency judge, and up to 3 refinement loops before generating the final response.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#DBEAFE', 'background': '#FFFFFF', 'mainBkg': '#FFFFFF', 'lineColor': '#6B7280', 'textColor': '#1F2937'}}}%%
 flowchart TD
     Q["User Query"] --> C{"LLM Classifier"}
+    C -->|is_conversational: true| Simple["Direct Response<br/>(no retrieval needed)"]
+    C -->|paths: sql/vector/history| Parallel["Parallel Path Execution"]
 
-    C -->|is_conversational: true| Simple["Simple Response<br/>(no retrieval)"]
-
-    C -->|paths: sql, vector, history| Parallel["Parallel Retrieval"]
-
-    subgraph Parallel["Parallel Path Execution"]
-        SQL["SQL Path<br/>Execute classifier's sql_hint<br/>or defer to LLM tools"]
-        Vec["Vector Path<br/>ChromaDB search_all()<br/>domain + investigations + profiles"]
-        Hist["History Path<br/>Episodic semantic search<br/>+ recent findings"]
+    subgraph Parallel
+        SQL["SQL Path<br/>Execute classifier's sql_hint<br/>(with self-correction up to 3 retries)"]
+        Vec["Vector Path<br/>ChromaDB search_all()<br/>domain_knowledge + investigation_history + roster_profiles"]
+        Hist["History Path<br/>Episodic semantic search<br/>+ recent findings by entity"]
     end
 
     Parallel --> Combine["Combine Contexts"]
     Combine --> Judge{"Sufficiency Judge<br/>(LLM)"}
 
     Judge -->|sufficient: true| Gen["Generate Final Response"]
-    Judge -->|sufficient: false| Refine["Refinement Loop"]
+    Judge -->|sufficient: false| Refine["Refinement Loop (max 3)"]
 
-    Refine --> |"refined_sql"| SQLRetry["Execute refined SQL"]
-    Refine --> |"refined_vector_query"| VecRetry["Re-search ChromaDB"]
-    Refine --> |"refined_history_query"| HistRetry["Re-search episodes"]
-    Refine --> |"missing + no refinement"| AutoSQL["Auto-generate SQL<br/>from missing data description"]
+    Refine -->|refined_sql| SQLRetry["Execute refined SQL"]
+    Refine -->|refined_vector_query| VecRetry["Re-search ChromaDB"]
+    Refine -->|refined_history_query| HistRetry["Re-search episodes"]
+    Refine -->|no refinement hint| AutoSQL["Auto-generate SQL<br/>from 'missing' description"]
 
     SQLRetry --> Judge
     VecRetry --> Judge
@@ -527,116 +452,192 @@ flowchart TD
     AutoSQL --> Judge
 
     Gen --> Dedup["Deduplicate<br/>(skip already-executed SQL)"]
-    Dedup --> LLMCall["LLM + Tool Calls"]
-    LLMCall --> Merge["Merge pre-fetched + new tool results"]
-    Merge --> Final["Final Response"]
+    Dedup --> LLMCall["Gemini + Tool Calls"]
+    LLMCall --> Merge["Merge pre-fetched + new results"]
+    Merge --> Final["Final Response + Charts"]
 
-    subgraph SelfCorrection["SQL Self-Correction (up to 3 retries)"]
+    subgraph SelfCorrection["SQL Self-Correction"]
         SQLExec["Execute SQL"] --> Err{"Error?"}
-        Err -->|Yes| Fix["LLM fixes SQL<br/>using schema hints +<br/>column corrections"]
+        Err -->|Yes| Fix["LLM rewrites SQL<br/>with schema + column hints"]
         Fix --> SQLExec
         Err -->|No| Result["Return results"]
     end
-
     SQL -.-> SelfCorrection
 
     style Q fill:#DBEAFE,stroke:#3B82F6,stroke-width:2px,color:#1E3A5F
     style C fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
-    style Simple fill:#E5E7EB,stroke:#6B7280,stroke-width:2px,color:#374151
-
     style Parallel fill:#EFF6FF,stroke:#3B82F6,stroke-width:2px,color:#1E3A5F
     style SQL fill:#CFFAFE,stroke:#06B6D4,stroke-width:2px,color:#164E63
     style Vec fill:#D1FAE5,stroke:#10B981,stroke-width:2px,color:#065F46
     style Hist fill:#EDE9FE,stroke:#8B5CF6,stroke-width:2px,color:#4C1D95
-
-    style Combine fill:#E0E7FF,stroke:#6366F1,stroke-width:2px,color:#312E81
     style Judge fill:#FEF3C7,stroke:#F59E0B,stroke-width:2px,color:#78350F
-    style Gen fill:#BBF7D0,stroke:#22C55E,stroke-width:2px,color:#14532D
     style Refine fill:#FECACA,stroke:#EF4444,stroke-width:2px,color:#7F1D1D
-
-    style SQLRetry fill:#CFFAFE,stroke:#06B6D4,color:#164E63
-    style VecRetry fill:#D1FAE5,stroke:#10B981,color:#065F46
-    style HistRetry fill:#EDE9FE,stroke:#8B5CF6,color:#4C1D95
-    style AutoSQL fill:#FED7AA,stroke:#F97316,stroke-width:2px,color:#7C2D12
-
-    style Dedup fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style LLMCall fill:#FBBF24,stroke:#B45309,stroke-width:2px,color:#78350F
-    style Merge fill:#E0E7FF,stroke:#6366F1,color:#312E81
-    style Final fill:#86EFAC,stroke:#16A34A,stroke-width:2px,color:#14532D
-
     style SelfCorrection fill:#FFF7ED,stroke:#F97316,stroke-width:2px,color:#7C2D12
-    style SQLExec fill:#FED7AA,stroke:#EA580C,color:#7C2D12
-    style Err fill:#FEF3C7,stroke:#F59E0B,color:#78350F
-    style Fix fill:#FECACA,stroke:#EF4444,color:#7F1D1D
-    style Result fill:#BBF7D0,stroke:#22C55E,color:#14532D
+    style Final fill:#86EFAC,stroke:#16A34A,stroke-width:2px,color:#14532D
 ```
 
 ### ChromaDB Collections
 
-| Collection | Contents | Indexed From | Purpose |
-|-----------|----------|-------------|---------|
-| `domain_knowledge` | Pipeline stages, failure statuses, LOB meanings, health flags, source systems, status codes, data notes | `semantic_knowledge.yaml` | Semantic search over domain concepts |
-| `investigation_history` | Past query + findings pairs | Episodic memory (on each episode) | Find similar past investigations |
-| `roster_profiles` | Org-level summaries (total ROs, failure rate, health score per org × state) | `org_summary` table | Natural language org lookup |
+| Collection | Contents | Populated From | Purpose |
+|-----------|----------|---------------|---------|
+| `domain_knowledge` | Pipeline stages, failure statuses, LOB meanings, health flags, source systems, status codes, cross-table relationships | `semantic_knowledge.yaml` (at startup + runtime) | Semantic lookup of domain concepts |
+| `investigation_history` | Past query + findings pairs | Episodic memory (after every query) | Surface similar past investigations |
+| `roster_profiles` | Org-level summaries: total ROs, failure rate, health score per org × state | `org_summary` table (at startup) | Natural language org lookup |
+
+---
+
+## Visualization Engine
+
+Six Plotly chart types are available via the `create_chart` tool or the `/dashboard/charts/` REST endpoints. All charts serialize to JSON and render in the frontend using `react-plotly.js`.
+
+| Chart Type | Function | What It Shows | Data Source |
+|-----------|----------|--------------|------------|
+| `health_heatmap` | `create_health_heatmap(df)` | Org × 7 pipeline stages colored GREEN/YELLOW/RED (numeric 0–2) | `roster` — top 30 orgs |
+| `failure_breakdown` | `create_failure_breakdown(stats_df, failure_df)` | Stacked bar of failure types per state; or failure rate bars per state | `roster` grouped by `FAILURE_STATUS` and `CNT_STATE` |
+| `duration_anomaly` | `create_duration_anomaly(df)` | Actual vs avg duration scatter with 2× anomaly threshold line | `roster` — DART_GEN, ISF_GEN, SPS_LOAD durations |
+| `market_trend` | `create_market_trend(df, market)` | Monthly SCS% line chart per market with 95% SLA threshold | `metrics` ordered by `MONTH_DATE` |
+| `retry_lift` | `create_retry_lift(df)` | Stacked bar: First Iteration Success + Retry Recovery per market | `metrics` latest month per market (sorted by `MONTH_DATE`) |
+| `stuck_tracker` | `create_stuck_tracker(df)` | Scatter of stuck ROs by org, sized by RED_COUNT, colored by PRIORITY | `roster WHERE IS_STUCK=1` |
+
+> **Note:** All temporal queries use `ORDER BY MARKET, MONTH_DATE` (not `MONTH`) to ensure correct chronological ordering across years when the string is in `MM-YYYY` format.
+
+---
+
+## Root Cause Reasoning
+
+The `trace_root_cause` procedure performs **statistical correlation analysis** across multiple dimensions to identify the true drivers of pipeline failures, rather than just returning top-N lists.
+
+### Analysis Dimensions
+
+```
+1. Market SCS Trend
+   → Latest SCS%, month-over-month change, 3-month trend direction
+
+2. Baseline Failure Stats
+   → total_ros, total_failed, baseline_fail_rate for target market/state
+
+3. Stage Blame Scores  (UNION ALL across 7 health columns)
+   → blame_pct = % of failed ROs with RED at each stage
+   → lift = (failed_with_red/total_failed) / (total_red/total_ros)
+   → Stages ranked by blame_pct × lift
+
+4. Source System Driver Scores
+   → Per SRC_SYS: failure_rate, share_of_failures
+   → driver_score = √(failure_rate × share_of_failures)  [geometric mean]
+   → Python-computed lift = (sys_fail/sys_total) / (total_fail/total_ros)
+   → Confidence: HIGH if lift > 2, MEDIUM if > 1.2
+
+5. LOB Driver Scores
+   → Same geometric mean + lift pattern applied to LOB_PRIMARY
+   → try/except fallback if column missing
+
+6. Retry Pattern Impact
+   → target market retry success rate vs global average
+   → Identifies if retrying is masking or resolving failures
+
+7. Cross-Dimension Hotspots  (SRC_SYS × LATEST_STAGE_NM matrix)
+   → Failure rate at each source system × stage intersection
+   → Surfaces specific "X from system Y always fails at stage Z" patterns
+
+8. Ranked Drivers List
+   → Unified ranking across stage, source, LOB dimensions
+   → Sorted by driver_score, labeled with confidence tier
+
+9. SCS Decline Context
+   → trend: declining / stable / improving
+   → Month-over-month acceleration of decline
+
+10. Causal Chain Narrative
+    → Synthesizes all above into ordered root causes with severity
+```
+
+The same correlation logic also runs in `cross_table_state_analysis()` in `tools/data_query.py` for any ad-hoc state-level cross-table queries triggered by the LLM.
+
+---
+
+## Procedural Learning Visibility
+
+When the LLM calls `update_procedure` in response to user feedback, the change is now visible end-to-end across all 4 layers:
+
+```
+1. procedural.py:update_procedure()
+   → Records {from_version, to_version, changes, timestamp} in modification_history
+   → Returns {procedure, old_version, new_version, changes}
+
+2. supervisor.py:handle()
+   → Detects tool_name == "update_procedure" && "new_version" in result
+   → Appends to procedure_updates list: {procedure_name, old_version, new_version, changes, change_description}
+
+3. main.py:/chat endpoint
+   → procedure_updates passed through ChatResponse Pydantic model
+
+4. chat/page.tsx — ProcedureLearningCard component (emerald theme)
+   → Header: Sparkles icon + "Procedural Learning — N procedure(s) updated"
+   → Expanded: version pill (v1 → v2), "What changed" bullet list, "Why" from change_description
+```
+
+This makes the agent's self-improvement transparent — users can see exactly what the agent learned from their feedback.
 
 ---
 
 ## Key Design Decisions
 
-Every technology and pattern in RosterIQ was chosen to minimise LLM errors and maximise reliability. Below is a summary of each decision and its rationale.
+### Why DuckDB over Pandas or SQLite
 
-### Why DuckDB (Not Pandas or SQLite)
+LLMs generate SQL far more reliably than Pandas code. DuckDB was chosen over SQLite for its analytical SQL features (`LIST_TRANSFORM`, `STRING_SPLIT`, `ILIKE`, complex `CREATE TABLE AS SELECT`) and in-memory mode (`:memory:`) for zero-infrastructure sub-millisecond queries. The DB reloads from CSVs on every restart so preprocessing changes never require schema migrations.
 
-LLMs generate SQL far more reliably than Pandas code — SQL is declarative, heavily represented in training data, and less prone to method-name hallucination. DuckDB was chosen over SQLite because it provides analytical SQL features critical to our preprocessing: `LIST_TRANSFORM`, `STRING_SPLIT`, `ILIKE`, and `CREATE TABLE AS SELECT` with complex subqueries. In-memory mode (`:memory:`) means zero infrastructure — DuckDB runs as a library inside the FastAPI process with sub-millisecond query latency. We reload from CSVs on every restart so preprocessing logic changes don't require migrations.
+### Why Pre-compute 15+ Enriched Columns
 
-### Why Feature Engineering at Preprocessing Time
+When asking Gemini to compute `PRIORITY`, `FAILURE_CATEGORY`, `LOB_COMPLIANCE_RISK`, or multi-column `HEALTH_SCORE` inline, it failed 40–60% of the time. Pre-computing during DuckDB table creation reduces LLM SQL to simple `SELECT col FROM table WHERE col = value` — which succeeds ~90% on the first attempt. With SQL self-correction, effective accuracy reaches ~98%.
 
-This is the single most impactful decision for LLM accuracy. When asking Gemini to generate complex inline SQL derivations (multi-branch `CASE WHEN`, LOB string decomposition, 7-column health aggregation), it failed 40-60% of the time. By precomputing 15+ enriched columns (`PRIORITY`, `FAILURE_CATEGORY`, `HEALTH_SCORE`, `LOB_COMPLIANCE_RISK`, `WORST_HEALTH_STAGE`, etc.) during DuckDB table creation, the LLM only needs to write simple `SELECT column FROM table WHERE column = 'value'` queries — which succeed ~90% on first attempt. Combined with SQL self-correction, effective accuracy reaches ~98%. Summary tables (`state_summary`, `org_summary`, `stage_health_summary`) eliminate aggregation errors entirely for common queries.
+### Why Geometric Mean for Driver Scores
 
-### Why the Refinement Loop (Up to 3 Iterations)
+`driver_score = √(failure_rate × share_of_failures)` ensures a source system must score on **both** dimensions to rank highly. A system with 100% failure rate but 0.1% share is less actionable than one with 30% failure rate and 30% share. Pure multiplication would be dominated by extremes; geometric mean produces balanced, actionable rankings.
 
-Single-shot retrieval fails for multi-faceted queries like "Why is TX SCS% dropping?" which needs metrics trends, failure breakdowns, episodic history, and possibly regulatory context. Our pipeline classifies which retrieval paths to activate (SQL, vector, history), runs them in parallel, then a sufficiency judge evaluates if the gathered context can answer the question. If not, it generates targeted refinements — a corrected SQL query, a rephrased vector search, or a history query — up to 3 times. Empirically: 70% sufficient after pass 1, 90% after pass 2, 97% after pass 3. Beyond 3 yields diminishing returns.
+### Why Regex Entity Extraction
+
+Regex takes <1 ms vs 800–1500 ms for LLM extraction. It's deterministic — it never hallucinates entities. The entity space is bounded: 50 US state codes, RO IDs matching `RO-\d+`, and 7 procedure names. Regex handles all of these with 100% precision.
+
+### Why the Sufficiency Judge + Refinement Loop
+
+Single-pass retrieval fails for multi-faceted queries like "Why is TX SCS% dropping?" which needs metrics trends, failure breakdowns, episodic history, and possibly regulatory context. The sufficiency judge evaluates if the gathered context is sufficient, then generates targeted refinements. Empirically: ~70% sufficient after pass 1, ~90% after pass 2, ~97% after pass 3.
 
 ### Why SQL Self-Correction (Not Blind Retry)
 
-The most common LLM SQL failure is wrong column names (`FAILURE_TYPE` instead of `FAILURE_CATEGORY`). Retrying the same prompt produces the same error. Our self-correction mechanism extracts schema hints and fuzzy-matched column corrections from the error, sends them with the full schema to the LLM, and gets a corrected query. Up to 3 attempts, after which the pipeline proceeds with available context.
+The most common LLM SQL failure is wrong column names (`FAILURE_TYPE` instead of `FAILURE_CATEGORY`). Retrying the same prompt produces the same error. The self-correction mechanism extracts schema hints and fuzzy-matched column corrections from the error message, then resends with the full schema. Up to 3 attempts.
 
 ### Why SQLite for Episodic Memory (Not ChromaDB Alone)
 
-Episodic memory requires both structured queries (filter by session, timestamp ranges, `GROUP BY` for session listing, `COUNT(*)` for consolidation triggers) and semantic search. ChromaDB can't do relational queries. Our hybrid: SQLite handles all structured operations; Gemini `text-embedding-004` embeddings stored as JSON enable cosine-similarity search in Python. Ranking formula: `cosine_similarity × 0.7 + importance_score × 0.3`.
+Episodic memory requires both structured queries (filter by session ID, timestamp ranges, `COUNT(*)` for consolidation triggers) and semantic search. ChromaDB cannot do relational queries. The hybrid: SQLite handles all structured operations; Gemini `text-embedding-004` embeddings stored as JSON enable cosine-similarity search in Python.
 
-### Why ChromaDB with 3 Separate Collections
+### Why Three Separate ChromaDB Collections
 
-`domain_knowledge` (static domain concepts from YAML), `investigation_history` (growing with every query), and `roster_profiles` (org summaries rebuilt at startup) have different update patterns and document types. Merging them would mix pipeline stage descriptions with past investigation findings with org statistics, degrading search relevance. Separate collections ensure each `search_all()` call returns focused, type-appropriate results.
+Merging `domain_knowledge`, `investigation_history`, and `roster_profiles` into one collection would mix static definitions with growing investigation logs with org statistics. Separate collections ensure each search returns focused, type-appropriate results.
 
-### Why Regex Entity Extraction (Not LLM-Based)
+### Why Multi-Agent Architecture
 
-Regex takes <1ms vs 800-1500ms for LLM extraction. It's deterministic — never hallucinates entities. Our entity space is bounded: 50 US state codes, RO IDs matching `RO-\d+`, 6 procedure names, and intent keywords. Regex handles all of these with 100% precision. We kept LLM extraction as dead code for potential future use with unbounded entity types.
+A single agent with all 7 tool definitions + full schema + semantic knowledge + episodic context = 8000+ token system prompts, causing the LLM to ignore parts and confuse tools. Splitting into Supervisor (routing), Pipeline Agent (stuck ROs), Quality Agent (failures, metrics), and Formatter gives each agent a focused ~2000-token prompt.
 
-### Why Multi-Agent (Supervisor + Specialists)
+### Why MONTH_DATE for Temporal Ordering
 
-A single agent with all 7 tool definitions + full schema + semantic knowledge + episodic context = 8000+ token system prompts, causing the LLM to ignore parts and confuse tools. Splitting into a Supervisor (routing), Pipeline Agent (stuck ROs, triage), Quality Agent (failures, metrics), and Query Pipeline (general queries) gives each agent a focused ~2000-token prompt. The Formatter Agent ensures consistent output quality regardless of which specialist produced the analysis.
-
-### Why Dynamic Schema Injection
-
-If preprocessing adds a column (e.g., `LOB_COMPLIANCE_RISK`) but the prompt schema is hardcoded, the LLM won't know it exists and will try to compute it inline — defeating preprocessing. `schema_provider.py` dynamically queries DuckDB's `DESCRIBE` at startup and injects the current schema (table names, column names, types, sample values) into every prompt. Schema always stays in sync with preprocessing.
+`MONTH` is stored as `MM-YYYY` strings. String comparison sorts `01-2024` before `12-2023` — reversing the timeline for multi-year datasets. All temporal queries use `ORDER BY MONTH_DATE` (a parsed `TIMESTAMP` added at preprocessing) to guarantee correct chronological ordering.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **LLM** | Google Gemini 2.5 Flash | Reasoning, classification, SQL generation, response formatting |
-| **Embeddings** | Gemini `text-embedding-004` | Episodic memory semantic search |
-| **Backend** | FastAPI + Uvicorn | REST API server |
-| **Analytical DB** | DuckDB (in-memory) | Sub-second SQL on roster + metrics data |
-| **Vector DB** | ChromaDB (persistent) | Semantic retrieval over domain knowledge, investigations, profiles |
-| **Episodic Store** | SQLite | Past investigations, state changes, digests |
-| **Web Search** | Tavily API | Regulatory context, org info, compliance updates |
-| **Charts** | Plotly.js | Heatmaps, trend lines, failure breakdowns, stuck trackers |
-| **Frontend** | Next.js 16, React 19, Tailwind, shadcn/ui, Framer Motion | Chat UI, dashboard, memory browser |
-| **Deployment** | Docker Compose | Two-container setup (backend:8000, frontend:3000) |
+| Layer | Technology | Version | Purpose |
+|-------|-----------|---------|---------|
+| **LLM** | Google Gemini 2.5 Flash | `gemini-2.5-flash` | Reasoning, classification, SQL generation, formatting |
+| **Embeddings** | Gemini text-embedding-004 | — | Episodic memory semantic search |
+| **Backend** | FastAPI + Uvicorn | 0.115.6 / 0.34.0 | REST API server |
+| **Analytical DB** | DuckDB (in-memory) | 1.1.3 | Sub-millisecond SQL on roster + metrics |
+| **Vector DB** | ChromaDB (persistent) | ≥0.4.0 | Semantic retrieval: 3 collections |
+| **Episodic Store** | SQLite | built-in | Past investigations, state changes, digests |
+| **Web Search** | Tavily API | tavily-python 0.5.0 | Regulatory context, org info, compliance |
+| **Charts** | Plotly (Python + JS) | 5.24.1 | Heatmaps, trend lines, scatter, bar charts |
+| **Frontend** | Next.js 16 + React 19 | 16.1.6 / 19.2.3 | Chat UI, dashboard, memory browser |
+| **Deployment** | Docker Compose | — | Two-container: backend:8000, frontend:3000 |
 
 ---
 
@@ -645,54 +646,174 @@ If preprocessing adds a column (e.g., `LOB_COMPLIANCE_RISK`) but the prompt sche
 ```
 Roaster-IQ/
 ├── backend/
-│   ├── main.py                     # FastAPI app, routes, lifespan initialization
-│   ├── data_loader.py              # CSV → DuckDB preprocessing pipeline
-│   ├── query_pipeline.py           # Multi-path classify → route → judge → generate
-│   ├── vector_store.py             # ChromaDB wrapper (3 collections)
-│   ├── schema_provider.py          # Dynamic schema injection for LLM prompts
-│   ├── prompts.py                  # Supervisor / agent system prompts
-│   ├── prompts_pipeline.py         # Classifier + sufficiency judge prompts
+│   ├── main.py                      # FastAPI app — all routes, lifespan initialization, Pydantic models
+│   ├── data_loader.py               # CSV → DuckDB: 4-step enrichment pipeline, 5 tables
+│   ├── query_pipeline.py            # Multi-path: classify → parallel retrieval → judge → refine → generate
+│   ├── vector_store.py              # ChromaDB wrapper: domain_knowledge, investigation_history, roster_profiles
+│   ├── schema_provider.py           # Dynamic schema cache: DESCRIBE queries at startup
+│   ├── prompts.py                   # Supervisor and specialist agent system prompts
+│   ├── prompts_pipeline.py          # Classifier and sufficiency judge prompts
 │   ├── requirements.txt
 │   ├── agents/
-│   │   ├── supervisor.py           # Main orchestrator — routing, memory, tools
-│   │   ├── pipeline_agent.py       # Specialized: stuck ROs, pipeline health
-│   │   ├── quality_agent.py        # Specialized: failures, market metrics
-│   │   ├── formatter_agent.py      # Final response cleanup
-│   │   └── llm_provider.py         # Gemini function-calling wrapper
+│   │   ├── supervisor.py            # Main orchestrator: routing, memory, tool execution, state-change detection
+│   │   ├── pipeline_agent.py        # Specialist: stuck ROs, pipeline health, triage
+│   │   ├── quality_agent.py         # Specialist: failures, market metrics, web search, regulatory
+│   │   ├── formatter_agent.py       # Final response cleanup and consistency
+│   │   └── llm_provider.py          # Gemini function-calling wrapper: model init, tool binding
 │   ├── memory/
-│   │   ├── episodic.py             # SQLite + embeddings episodic store
-│   │   ├── procedural.py           # JSON versioned procedures
-│   │   └── semantic.py             # YAML domain knowledge
+│   │   ├── episodic.py              # SQLite: episodes, state_changes, episode_digests; embedding search
+│   │   ├── procedural.py            # JSON: versioned procedures, execution log, effectiveness stats
+│   │   └── semantic.py              # YAML: domain knowledge, ChromaDB indexing
 │   ├── tools/
-│   │   ├── data_query.py           # DuckDB SQL execution + schema hints
-│   │   ├── visualizations.py       # Plotly chart generators
-│   │   ├── web_search.py           # Tavily search (regulatory, org, compliance)
-│   │   └── report_generator.py     # State/org report builder
+│   │   ├── data_query.py            # DuckDB SQL execution, self-correction, cross_table_state_analysis
+│   │   ├── visualizations.py        # Plotly chart generators (6 chart types → JSON)
+│   │   ├── web_search.py            # Tavily: regulatory, org, compliance, LOB, general search
+│   │   └── report_generator.py      # Full state/org pipeline health report builder
 │   └── procedures/
-│       └── engine.py               # Procedure step executor
+│       └── engine.py                # Procedure executor dispatch + 7 dedicated _execute_*() functions
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx                # Redirect → /chat
-│   │   ├── layout.tsx              # Root layout + sidebar
-│   │   ├── chat/page.tsx           # Main conversational interface
-│   │   ├── dashboard/page.tsx      # Pipeline overview + charts + alerts
-│   │   └── memory/page.tsx         # Episodic / procedural / semantic browser
+│   │   ├── page.tsx                 # Root → redirects to /chat
+│   │   ├── layout.tsx               # Root layout with sidebar navigation
+│   │   ├── chat/page.tsx            # Chat UI: messages, tool cards, charts, procedure learning cards
+│   │   ├── dashboard/page.tsx       # Overview + Charts tabs, filter controls, intelligence section
+│   │   └── memory/page.tsx          # Three-tab memory browser: Episodic / Procedural / Semantic
 │   ├── components/
-│   │   ├── charts/PlotlyChart.tsx   # Plotly JSON renderer
-│   │   ├── layout/Sidebar.tsx       # Navigation sidebar
-│   │   └── ui/                      # shadcn component library
-│   └── lib/api.ts                   # API client (fetch wrapper)
-├── memory/
-│   ├── procedures.json              # Procedure definitions (versioned)
-│   ├── semantic_knowledge.yaml      # Domain knowledge base
-│   ├── episodic.db                  # SQLite runtime database
+│   │   ├── charts/PlotlyChart.tsx   # Plotly JSON → rendered chart component
+│   │   ├── layout/Sidebar.tsx       # Navigation with route highlighting
+│   │   └── ui/                      # shadcn/ui component library
+│   └── lib/
+│       ├── api.ts                   # All API functions + TypeScript interfaces
+│       └── utils.ts                 # Utility helpers
+├── memory/                          # Persistent memory storage (gitignored in production)
+│   ├── procedures.json              # Versioned procedure definitions + execution logs
+│   ├── semantic_knowledge.yaml      # Domain knowledge base (static + runtime-learned)
+│   ├── episodic.db                  # SQLite: episodes, state_changes, digests
 │   └── chroma_db/                   # ChromaDB persistence directory
 ├── data/
 │   ├── roster_processing_details.csv
 │   └── aggregated_operational_metrics.csv
-├── docker-compose.yml
-└── .env                             # GEMINI_API_KEY, TAVILY_API_KEY
+├── docker-compose.yml               # backend:8000 + frontend:3000
+└── .env                             # GEMINI_API_KEY, TAVILY_API_KEY, NEXT_PUBLIC_API_URL
 ```
+
+---
+
+## API Reference
+
+### Chat
+
+| Method | Endpoint | Body / Params | Response |
+|--------|----------|--------------|---------|
+| `POST` | `/chat` | `{message: string, session_id?: string}` | `ChatResponse` |
+| `GET` | `/session/briefing` | `?session_id=` | `{briefing: string, has_briefing: bool}` |
+
+### Memory
+
+| Method | Endpoint | Body / Params | Response |
+|--------|----------|--------------|---------|
+| `GET` | `/memory/episodic` | `?limit=50` | Episodes list + state changes |
+| `GET` | `/memory/procedural` | — | All procedures with version history and effectiveness stats |
+| `GET` | `/memory/semantic` | — | Full domain knowledge YAML as JSON |
+| `POST` | `/memory/procedural` | `{name, description, steps, parameters}` | Created procedure |
+| `PUT` | `/memory/procedural/{name}` | Update dict | Updated procedure |
+
+### Dashboard
+
+| Method | Endpoint | Params | Response |
+|--------|----------|--------|---------|
+| `GET` | `/dashboard/overview` | `state, time_filter, from_month, to_month` | Totals, market summary, stage summary |
+| `GET` | `/dashboard/options` | — | `{states, markets, months}` filter options |
+| `GET` | `/dashboard/charts/heatmap` | `state, time_filter, from_month, to_month` | Health heatmap Plotly JSON |
+| `GET` | `/dashboard/charts/market_trend` | `market, months, from_month, to_month` | SCS% trend Plotly JSON |
+| `GET` | `/dashboard/charts/retry_lift` | `market, months, from_month, to_month` | Retry lift Plotly JSON |
+| `GET` | `/dashboard/charts/stuck_tracker` | `state, time_filter, from_month, to_month` | Stuck RO tracker Plotly JSON |
+| `GET` | `/dashboard/alerts` | `scs_threshold=95.0` | Proactive alert list |
+| `GET` | `/dashboard/intelligence` | — | Health status, root cause insights, recommended actions, procedure effectiveness |
+
+### Procedures & Reports
+
+| Method | Endpoint | Body | Response |
+|--------|----------|------|---------|
+| `POST` | `/procedure/{name}` | `{params: {...}}` | Procedure result with chart |
+| `POST` | `/report/generate` | `{state?, org?, lob?, source_system?}` | Full `PipelineReport` |
+| `GET` | `/report/latest` | — | Last generated report |
+
+### System
+
+| Method | Endpoint | Response |
+|--------|----------|---------|
+| `GET` | `/health` | `{status, tables: {roster, metrics, state_summary, ...}, timestamp}` |
+| `GET` | `/alerts` | Alert list (legacy; dashboard/alerts preferred) |
+
+### ChatResponse Schema
+
+```typescript
+interface ChatResponse {
+  message: string;              // Formatted markdown response
+  charts: Record<string, unknown>[];   // Plotly JSON objects
+  memory_updates: {
+    episodic?: { logged: boolean; episode_id: number };
+    state_changes?: { entity: string; field: string; old: string; new: string; note?: string }[];
+  };
+  web_search_results: { query: string; results: { title: string; url: string; content: string }[] }[];
+  tool_calls: {
+    tool: string;
+    args: Record<string, unknown>;
+    result: { row_count?: number; columns?: string[]; data?: Record<string, unknown>[]; error?: string; summary?: string };
+  }[];
+  procedure_used: string | null;       // Which procedure was run (if any)
+  procedure_updates: {                 // Which procedures were modified (if any)
+    procedure_name: string;
+    old_version: number;
+    new_version: number;
+    changes: Record<string, string>;
+    change_description: string;
+  }[];
+  agent_used: string | null;           // "pipeline_agent" | "quality_agent" | "supervisor" | null
+  session_id: string;
+}
+```
+
+---
+
+## Frontend Pages
+
+### `/chat` — Conversational AI
+
+- Suggested query cards (with gradient icons) covering triage, audit, market health, root cause, retry, LOB compliance
+- Slash command shortcuts: `/triage`, `/audit`, `/market`, `/report`, `/retry`, `/cluster`, `/root-cause`
+- Custom procedure creation modal (name, description, steps)
+- Tool call transparency: collapsible cards for SQL queries (with data tables), procedure results, chart calls, web searches, memory recalls
+- Data tables: 10-row preview, expand button for full results, column headers
+- **Procedural Learning Cards**: emerald-themed cards showing version bumps, bullet-listed changes, and the reason why the procedure was updated
+- Web search result cards with source URLs and content previews
+- State change notifications (animated alerts when pipeline state changes between queries)
+- Plotly charts rendered inline with full interactivity
+- Session briefing banner at conversation start
+- Auto-scroll with "Jump to bottom" button
+- Streaming loading indicator (3 bouncing dots)
+
+### `/dashboard` — Pipeline Overview
+
+**Overview Tab:**
+- KPI cards: Total ROs, Stuck ROs, Failed ROs, Avg Red Flags
+- Market summary table with SCS%, retry lift, below-SLA flag
+- Proactive alert list with severity badges and recommended action buttons
+- Intelligence section: pipeline health status badge, root cause insights, recommended actions with one-click execution
+- Latest pipeline report (collapsible with full breakdown: stage bottlenecks, failure categories, market context, flagged ROs)
+
+**Charts Tab:**
+- All 4 charts with shared filter controls (state, market, time filter, month range)
+- `time_filter`: all | 7d | 1m | custom (with MM-YYYY from/to pickers)
+- `months` slider: 3, 6, 12, 18, 24, or 36 months
+
+### `/memory` — Memory Browser
+
+Three tabs:
+- **Episodic**: Searchable list of past investigations, each showing timestamp, intent, entities found, findings summary, tools used, importance score
+- **Procedural**: All procedures with version number, step list, effectiveness metrics (resolved rate, total runs), and create-new-procedure button
+- **Semantic**: Category tree of domain knowledge with key/value pairs; entries added at runtime via web search are marked
 
 ---
 
@@ -702,21 +823,21 @@ Roaster-IQ/
 
 - Python 3.11+
 - Node.js 18+
-- Google Gemini API key
-- Tavily API key (optional, for web search)
+- Google Gemini API key (`GEMINI_API_KEY`)
+- Tavily API key (`TAVILY_API_KEY`)
 
 ### Environment Setup
 
 ```bash
-# Clone and navigate
 cd Roaster-IQ
-
-# Copy the example env and fill in your keys
 cp .env.example .env
-# Then edit .env with your actual API keys
+# Edit .env with your API keys:
+# GEMINI_API_KEY=...
+# TAVILY_API_KEY=...
+# NEXT_PUBLIC_API_URL=http://localhost:8000  (or your backend URL)
 ```
 
-### Option 1: Docker Compose
+### Option 1 — Docker Compose (recommended)
 
 ```bash
 docker-compose up --build
@@ -724,50 +845,27 @@ docker-compose up --build
 
 Backend: `http://localhost:8000` | Frontend: `http://localhost:3000`
 
-### Option 2: Local Development
+### Option 2 — Local Development
 
 ```bash
-# Backend
+# Terminal 1: Backend
 cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 
-# Frontend (separate terminal)
+# Terminal 2: Frontend
 cd frontend
 npm install
 npm run dev
 ```
 
----
+### First-Run Behavior
 
-## API Reference
+On startup the backend:
+1. Loads and enriches both CSVs into DuckDB (5 tables, 15+ derived columns)
+2. Builds the schema cache for LLM prompt injection
+3. Initializes ChromaDB (indexes domain knowledge + org profiles)
+4. Migrates procedural memory (adds `execution_log` to legacy procedures)
+5. Starts the FastAPI server on port 8000
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/chat` | Send a query, get AI response + charts |
-| `GET` | `/session/briefing` | Session briefing (state change detection) |
-| `GET` | `/memory/episodic` | Browse past investigations |
-| `GET` | `/memory/procedural` | View diagnostic procedures |
-| `GET` | `/memory/semantic` | View domain knowledge |
-| `PUT` | `/memory/procedural/{name}` | Update a procedure |
-| `POST` | `/memory/procedural` | Create a new procedure |
-| `GET` | `/dashboard/overview` | Pipeline health overview |
-| `GET` | `/dashboard/charts/{type}` | Generate specific chart |
-| `GET` | `/dashboard/alerts` | Proactive monitoring alerts |
-| `GET` | `/dashboard/intelligence` | AI-generated intelligence briefing |
-| `POST` | `/procedure/{name}` | Execute a diagnostic procedure |
-| `POST` | `/report/generate` | Generate state/org report |
-| `GET` | `/alerts` | Current alert list |
-
----
-
-## Frontend Pages
-
-### `/chat` — Conversational AI
-Natural language interface with suggested queries, slash commands (`/triage`, `/audit`, `/report`), inline chart rendering, and tool call transparency.
-
-### `/dashboard` — Pipeline Overview
-Real-time pipeline health: stuck RO counts, failure rates, SCS% trends, health heatmaps, proactive alerts with one-click procedure execution.
-
-### `/memory` — Memory Browser
-Three tabs (Episodic / Procedural / Semantic) for inspecting and editing the agent's memory. View past investigations, procedure version history, and domain knowledge entries.
+If `memory/episodic.db` does not exist it is created fresh. If `memory/procedures.json` does not exist the default 7 procedures are seeded.

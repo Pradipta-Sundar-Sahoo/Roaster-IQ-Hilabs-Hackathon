@@ -521,14 +521,14 @@ class SupervisorAgent:
             elif chart_type == "market_trend":
                 market = params.get("market")
                 where = f"WHERE MARKET = '{market}'" if market else ""
-                df = db_query(f"SELECT * FROM metrics {where} ORDER BY MARKET, MONTH")
+                df = db_query(f"SELECT * FROM metrics {where} ORDER BY MARKET, MONTH_DATE")
                 return {"chart": create_market_trend(df, market)}
 
             elif chart_type == "retry_lift":
                 df = db_query("""
                     SELECT MARKET, MONTH, FIRST_ITER_SCS_CNT, NEXT_ITER_SCS_CNT, OVERALL_SCS_CNT,
                            ROUND((NEXT_ITER_SCS_CNT - FIRST_ITER_SCS_CNT)*100.0/NULLIF(FIRST_ITER_SCS_CNT,0),2) as retry_lift_pct
-                    FROM metrics ORDER BY MARKET, MONTH
+                    FROM metrics ORDER BY MARKET, MONTH_DATE
                 """)
                 return {"chart": create_retry_lift(df)}
 

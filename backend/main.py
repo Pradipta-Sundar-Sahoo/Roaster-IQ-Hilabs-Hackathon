@@ -334,7 +334,7 @@ async def dashboard_chart_market_trend(
     where = tc or "1=1"
     if market:
         where += f" AND MARKET = '{market}'"
-    df = query(f"SELECT * FROM metrics WHERE {where} ORDER BY MARKET, MONTH")
+    df = query(f"SELECT * FROM metrics WHERE {where} ORDER BY MARKET, MONTH_DATE")
     chart = create_market_trend(df, market)
     return {"chart": chart, "filters": {"market": market, "months": months}}
 
@@ -356,7 +356,7 @@ async def dashboard_chart_retry_lift(
         where += f" AND MARKET = '{market}'"
     df = query(f"""
         SELECT MARKET, MONTH, FIRST_ITER_SCS_CNT, NEXT_ITER_SCS_CNT, OVERALL_SCS_CNT
-        FROM metrics WHERE {where} ORDER BY MARKET, MONTH
+        FROM metrics WHERE {where} ORDER BY MARKET, MONTH_DATE
     """)
     chart = create_retry_lift(df)
     return {"chart": chart, "filters": {"market": market, "months": months}}

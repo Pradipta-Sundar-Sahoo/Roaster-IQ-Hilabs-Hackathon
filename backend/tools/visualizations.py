@@ -225,8 +225,9 @@ def create_retry_lift(df: pd.DataFrame) -> dict:
     if df.empty:
         return None
 
-    # Get latest month per market
-    latest = df.sort_values("MONTH", ascending=False).groupby("MARKET").first().reset_index()
+    # Get latest month per market — use MONTH_DATE for correct chronological order
+    sort_col = "MONTH_DATE" if "MONTH_DATE" in df.columns else "MONTH"
+    latest = df.sort_values(sort_col, ascending=False).groupby("MARKET").first().reset_index()
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
