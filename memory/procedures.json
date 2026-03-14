@@ -88,6 +88,20 @@
         "params": {},
         "outcome": "unresolved",
         "session_id": "7c78fdeb-cd4e-4c1e-8c72-3c77ccf08a49"
+      },
+      {
+        "timestamp": "2026-03-14T07:19:00.886250",
+        "params": {
+          "state": "NY"
+        },
+        "outcome": "resolved",
+        "session_id": "6f141a28-fbca-4306-9421-b954be078550"
+      },
+      {
+        "timestamp": "2026-03-14T07:19:17.092280",
+        "params": {},
+        "outcome": "unresolved",
+        "session_id": "6f141a28-fbca-4306-9421-b954be078550"
       }
     ]
   },

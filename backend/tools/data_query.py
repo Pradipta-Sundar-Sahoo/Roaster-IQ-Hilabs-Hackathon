@@ -239,26 +239,44 @@ def get_retry_analysis() -> dict:
 
 
 def cross_table_state_analysis(state: str) -> dict:
-    """Cross-table: correlate CSV1 state failures with CSV2 market SCS%."""
+    """Cross-table analysis with correlation scoring across stage, source system, LOB, and retry dimensions."""
+    # ── Baseline stats ──
     roster_stats = query(f"""
         SELECT
             COUNT(*) as total_files,
             SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failed_files,
             ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate,
-            SUM(CASE WHEN IS_STUCK = 1 THEN 1 ELSE 0 END) as stuck_files
+            SUM(CASE WHEN IS_STUCK = 1 THEN 1 ELSE 0 END) as stuck_files,
+            SUM(IS_RETRY) as retry_files,
+            ROUND(AVG(RED_COUNT), 2) as avg_red_count,
+            ROUND(AVG(HEALTH_SCORE), 2) as avg_health_score
         FROM roster
         WHERE CNT_STATE = '{state}'
     """)
 
-    market_stats = query(f"""
-        SELECT MONTH, SCS_PERCENT,
-               FIRST_ITER_SCS_CNT, FIRST_ITER_FAIL_CNT,
-               OVERALL_SCS_CNT, OVERALL_FAIL_CNT
-        FROM metrics
-        WHERE MARKET = '{state}'
-        ORDER BY MONTH
-    """)
+    total_failed = int(roster_stats.iloc[0]["failed_files"]) if not roster_stats.empty else 0
+    baseline_fail_rate = float(roster_stats.iloc[0]["failure_rate"]) if not roster_stats.empty else 0
 
+    # ── Market SCS trend ──
+    try:
+        market_stats = query(f"""
+            SELECT MONTH, SCS_PERCENT,
+                   ROUND(SCS_PERCENT - LAG(SCS_PERCENT) OVER (ORDER BY MONTH_DATE), 2) as scs_change,
+                   FIRST_ITER_SCS_CNT, FIRST_ITER_FAIL_CNT,
+                   OVERALL_SCS_CNT, OVERALL_FAIL_CNT,
+                   ROUND(RETRY_LIFT_PCT, 2) as retry_lift_pct
+            FROM metrics
+            WHERE MARKET = '{state}'
+            ORDER BY MONTH_DATE DESC
+        """)
+    except Exception:
+        market_stats = query(f"""
+            SELECT MONTH, SCS_PERCENT, FIRST_ITER_SCS_CNT, FIRST_ITER_FAIL_CNT,
+                   OVERALL_SCS_CNT, OVERALL_FAIL_CNT
+            FROM metrics WHERE MARKET = '{state}' ORDER BY MONTH
+        """)
+
+    # ── Top failing orgs ──
     top_failing_orgs = query(f"""
         SELECT ORG_NM,
                COUNT(*) as total,
@@ -271,9 +289,141 @@ def cross_table_state_analysis(state: str) -> dict:
         LIMIT 10
     """)
 
+    # ── Stage blame scores ──
+    # blame_pct: % of failed ROs with RED at each stage | lift: enrichment vs. all ROs
+    stage_blame = query(f"""
+        SELECT stage,
+               ROUND(failed_with_red * 100.0 / NULLIF(total_failed_s, 0), 2) as blame_pct,
+               ROUND(total_red * 100.0 / NULLIF(total_s, 0), 2) as overall_red_pct,
+               ROUND(
+                   (failed_with_red * 1.0 / NULLIF(total_failed_s, 0))
+                   / NULLIF(total_red * 1.0 / NULLIF(total_s, 0), 0)
+               , 2) as lift,
+               failed_with_red, total_failed_s, total_red, total_s
+        FROM (
+            SELECT 'PRE_PROCESSING' as stage,
+                SUM(CASE WHEN PRE_PROCESSING_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END) as failed_with_red,
+                SUM(IS_FAILED) as total_failed_s,
+                SUM(CASE WHEN PRE_PROCESSING_HEALTH='RED' THEN 1 ELSE 0 END) as total_red,
+                COUNT(*) as total_s
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'MAPPING_APROVAL',
+                SUM(CASE WHEN MAPPING_APROVAL_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN MAPPING_APROVAL_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'ISF_GEN',
+                SUM(CASE WHEN ISF_GEN_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN ISF_GEN_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'DART_GEN',
+                SUM(CASE WHEN DART_GEN_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_GEN_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'DART_REVIEW',
+                SUM(CASE WHEN DART_REVIEW_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_REVIEW_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'DART_UI_VALIDATION',
+                SUM(CASE WHEN DART_UI_VALIDATION_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_UI_VALIDATION_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+            UNION ALL
+            SELECT 'SPS_LOAD',
+                SUM(CASE WHEN SPS_LOAD_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN SPS_LOAD_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{state}'
+        ) t
+        WHERE total_red > 0
+        ORDER BY lift DESC NULLS LAST, blame_pct DESC
+    """)
+
+    # ── Source system driver scores ──
+    source_scores = query(f"""
+        SELECT SRC_SYS,
+               COUNT(*) as total,
+               SUM(IS_FAILED) as failed,
+               ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+               ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as share_of_failures,
+               ROUND(SQRT(
+                   (SUM(IS_FAILED) * 100.0 / NULLIF(COUNT(*), 0))
+                   * (SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0))
+               ), 2) as driver_score
+        FROM roster WHERE CNT_STATE = '{state}'
+        GROUP BY SRC_SYS
+        HAVING SUM(IS_FAILED) > 0
+        ORDER BY driver_score DESC
+    """)
+    if not source_scores.empty and baseline_fail_rate > 0:
+        source_scores["lift"] = (source_scores["failure_rate"] / baseline_fail_rate).round(2)
+
+    # ── LOB driver scores ──
+    try:
+        lob_scores = query(f"""
+            SELECT COALESCE(LOB_PRIMARY, 'UNKNOWN') as LOB,
+                   COUNT(*) as total,
+                   SUM(IS_FAILED) as failed,
+                   ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+                   ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as share_of_failures,
+                   ROUND(SQRT(
+                       (SUM(IS_FAILED) * 100.0 / NULLIF(COUNT(*), 0))
+                       * (SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0))
+                   ), 2) as driver_score
+            FROM roster WHERE CNT_STATE = '{state}'
+            GROUP BY LOB_PRIMARY
+            HAVING SUM(IS_FAILED) > 0
+            ORDER BY driver_score DESC
+            LIMIT 10
+        """)
+        if not lob_scores.empty and baseline_fail_rate > 0:
+            lob_scores["lift"] = (lob_scores["failure_rate"] / baseline_fail_rate).round(2)
+    except Exception:
+        lob_scores = None
+
+    # ── Retry effectiveness for this state vs. global ──
+    retry_state = query(f"""
+        SELECT SUM(IS_RETRY) as total_retry,
+               SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) as retry_success,
+               ROUND(SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) * 100.0
+                     / NULLIF(SUM(IS_RETRY), 0), 2) as retry_success_rate
+        FROM roster WHERE CNT_STATE = '{state}'
+    """)
+    retry_global = query("""
+        SELECT ROUND(SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) * 100.0
+                     / NULLIF(SUM(IS_RETRY), 0), 2) as retry_success_rate
+        FROM roster
+    """)
+    retry_row = retry_state.iloc[0].to_dict() if not retry_state.empty else {}
+    global_rate = float(retry_global.iloc[0]["retry_success_rate"] or 0) if not retry_global.empty else 0
+    retry_row["global_retry_success_rate"] = global_rate
+    retry_row["retry_effectiveness_gap"] = round(global_rate - float(retry_row.get("retry_success_rate") or 0), 2)
+
+    # ── Cross-dimension hotspots: source × stage ──
+    cross_dim = query(f"""
+        SELECT SRC_SYS, LATEST_STAGE_NM,
+               COUNT(*) as total,
+               SUM(IS_FAILED) as failed,
+               ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+               ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as pct_of_all_failures
+        FROM roster WHERE CNT_STATE = '{state}'
+        GROUP BY SRC_SYS, LATEST_STAGE_NM
+        HAVING SUM(IS_FAILED) >= 2
+        ORDER BY failure_rate DESC, failed DESC
+        LIMIT 12
+    """)
+
     return {
         "state": state,
         "roster_stats": roster_stats.to_dict(orient="records"),
-        "market_trends": market_stats.to_dict(orient="records"),
+        "market_trends": market_stats.where(market_stats.notna(), None).to_dict(orient="records") if not market_stats.empty else [],
         "top_failing_orgs": top_failing_orgs.to_dict(orient="records"),
+        "stage_blame_scores": stage_blame.where(stage_blame.notna(), None).to_dict(orient="records"),
+        "source_driver_scores": source_scores.where(source_scores.notna(), None).to_dict(orient="records"),
+        "lob_driver_scores": lob_scores.where(lob_scores.notna(), None).to_dict(orient="records") if lob_scores is not None and not lob_scores.empty else [],
+        "retry_effectiveness": retry_row,
+        "cross_dimension_hotspots": cross_dim.where(cross_dim.notna(), None).to_dict(orient="records"),
     }

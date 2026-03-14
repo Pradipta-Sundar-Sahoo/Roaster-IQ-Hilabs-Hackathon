@@ -270,7 +270,7 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
 
 
 def _execute_quality_audit(procedure: dict, params: dict) -> dict:
-    """Execute record_quality_audit procedure — reads steps from JSON."""
+    """Execute record_quality_audit procedure — file-level flags + record-level ratios."""
     state = _get_param(procedure, params, "state")
     org = _get_param(procedure, params, "org")
     threshold = _get_param(procedure, params, "threshold", 5.0)
@@ -282,53 +282,165 @@ def _execute_quality_audit(procedure: dict, params: dict) -> dict:
         conditions.append(f"ORG_NM LIKE '%{org}%'")
     where = " AND ".join(conditions) if conditions else "1=1"
 
+    # ── 1. Per-org file-level stats + composite quality score ──
+    # QUALITY_SCORE = 60% health (avg HEALTH_SCORE / 14 max) + 40% non-failure rate
     stats_sql = _get_step_sql(procedure, "failure", f"""
-        SELECT CNT_STATE, ORG_NM,
-               COUNT(*) as total_files,
-               SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failed_files,
-               ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate
+        SELECT
+            CNT_STATE,
+            ORG_NM,
+            COUNT(*)                                                                   AS total_files,
+            SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END)                            AS failed_files,
+            SUM(CASE WHEN IS_STUCK  = 1 THEN 1 ELSE 0 END)                            AS stuck_files,
+            ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS failure_rate,
+            ROUND(SUM(CASE WHEN IS_STUCK  = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS stuck_rate,
+            ROUND(AVG(RED_COUNT),    2)                                                AS avg_red_flags,
+            ROUND(AVG(YELLOW_COUNT), 2)                                                AS avg_yellow_flags,
+            ROUND(AVG(HEALTH_SCORE), 2)                                                AS avg_health_score,
+            ROUND(
+                0.6 * (AVG(HEALTH_SCORE) / 14.0 * 100)
+                + 0.4 * (1.0 - SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*1.0/COUNT(*)) * 100
+            , 1)                                                                       AS quality_score
         FROM roster WHERE {where}
         GROUP BY CNT_STATE, ORG_NM
-        ORDER BY failure_rate DESC LIMIT 50
+        ORDER BY quality_score ASC
+        LIMIT 50
     """)
     stats_df = query(stats_sql)
 
+    # ── 2. Per-stage RED flag counts per org ──
     red_sql = _get_step_sql(procedure, "red health", f"""
-        SELECT CNT_STATE, ORG_NM,
-               SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'RED' THEN 1 ELSE 0 END) as pre_proc_red,
-               SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'RED' THEN 1 ELSE 0 END) as mapping_red,
-               SUM(CASE WHEN ISF_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as isf_red,
-               SUM(CASE WHEN DART_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_gen_red,
-               SUM(CASE WHEN DART_REVIEW_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_review_red,
-               SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_ui_red,
-               SUM(CASE WHEN SPS_LOAD_HEALTH = 'RED' THEN 1 ELSE 0 END) as sps_red
+        SELECT
+            CNT_STATE,
+            ORG_NM,
+            SUM(CASE WHEN PRE_PROCESSING_HEALTH      = 'RED' THEN 1 ELSE 0 END) AS pre_proc_red,
+            SUM(CASE WHEN MAPPING_APROVAL_HEALTH      = 'RED' THEN 1 ELSE 0 END) AS mapping_red,
+            SUM(CASE WHEN ISF_GEN_HEALTH              = 'RED' THEN 1 ELSE 0 END) AS isf_red,
+            SUM(CASE WHEN DART_GEN_HEALTH             = 'RED' THEN 1 ELSE 0 END) AS dart_gen_red,
+            SUM(CASE WHEN DART_REVIEW_HEALTH          = 'RED' THEN 1 ELSE 0 END) AS dart_review_red,
+            SUM(CASE WHEN DART_UI_VALIDATION_HEALTH   = 'RED' THEN 1 ELSE 0 END) AS dart_ui_red,
+            SUM(CASE WHEN SPS_LOAD_HEALTH             = 'RED' THEN 1 ELSE 0 END) AS sps_red,
+            SUM(RED_COUNT)                                                         AS total_red_flags,
+            ROUND(AVG(RED_COUNT), 2)                                               AS avg_red_per_file
         FROM roster WHERE {where}
         GROUP BY CNT_STATE, ORG_NM
-        ORDER BY (pre_proc_red + mapping_red + isf_red + dart_gen_red + dart_review_red + dart_ui_red + sps_red) DESC
+        ORDER BY total_red_flags DESC
         LIMIT 50
     """)
     red_df = query(red_sql)
 
+    # ── 3. Failure breakdown by status + category ──
     failure_df = query(f"""
-        SELECT FAILURE_STATUS, COUNT(*) as cnt
+        SELECT FAILURE_STATUS, FAILURE_CATEGORY, COUNT(*) AS cnt
         FROM roster WHERE IS_FAILED = 1 AND {where}
-        GROUP BY FAILURE_STATUS ORDER BY cnt DESC
+        GROUP BY FAILURE_STATUS, FAILURE_CATEGORY
+        ORDER BY cnt DESC
     """)
 
-    flagged = stats_df[stats_df["failure_rate"] > threshold]
+    # ── 4. Record-level ratios from metrics (MARKET = CNT_STATE) ──
+    # PS metrics: FAIL_REC_CNT/TOT_REC_CNT, REJ_REC_CNT/TOT_REC_CNT, SCS_REC_CNT/TOT_REC_CNT
+    target_states = [state] if state else []
+    if not target_states and not org:
+        top_states = query("SELECT CNT_STATE FROM roster GROUP BY CNT_STATE ORDER BY COUNT(*) DESC LIMIT 5")
+        target_states = top_states["CNT_STATE"].tolist()
+    elif not target_states and org:
+        org_states = query(f"SELECT DISTINCT CNT_STATE FROM roster WHERE ORG_NM LIKE '%{org}%'")
+        target_states = org_states["CNT_STATE"].tolist()
+
+    record_level_metrics = []
+    rec_summary = {}
+    if target_states:
+        placeholders = ", ".join(f"'{s}'" for s in target_states)
+        # Use derived columns if enrichment succeeded, otherwise compute inline
+        cols_df = query("DESCRIBE metrics")
+        available_cols = set(cols_df["column_name"].str.upper().tolist())
+        if "SCS_REC_RATIO" in available_cols:
+            rec_sql = f"""
+                SELECT
+                    MARKET,
+                    MONTH,
+                    TOT_REC_CNT,
+                    OVERALL_SCS_CNT                  AS scs_rec_cnt,
+                    OVERALL_FAIL_CNT                 AS fail_rec_cnt,
+                    FIRST_ITER_FAIL_CNT              AS rej_rec_cnt,
+                    ROUND(SCS_REC_RATIO, 2)          AS scs_rec_ratio,
+                    ROUND(FAIL_REC_RATIO, 2)         AS fail_rec_ratio,
+                    ROUND(REJ_REC_RATIO, 2)          AS rej_rec_ratio,
+                    ROUND(RETRY_RESOLUTION_RATE, 2)  AS retry_resolution_rate,
+                    SCS_PERCENT
+                FROM metrics
+                WHERE MARKET IN ({placeholders})
+                ORDER BY MARKET, MONTH_DATE DESC
+            """
+        else:
+            rec_sql = f"""
+                SELECT
+                    MARKET,
+                    MONTH,
+                    (OVERALL_SCS_CNT + OVERALL_FAIL_CNT)                                                      AS TOT_REC_CNT,
+                    OVERALL_SCS_CNT                                                                            AS scs_rec_cnt,
+                    OVERALL_FAIL_CNT                                                                           AS fail_rec_cnt,
+                    FIRST_ITER_FAIL_CNT                                                                        AS rej_rec_cnt,
+                    ROUND(OVERALL_SCS_CNT  * 100.0 / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 2)       AS scs_rec_ratio,
+                    ROUND(OVERALL_FAIL_CNT * 100.0 / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 2)       AS fail_rec_ratio,
+                    ROUND(FIRST_ITER_FAIL_CNT * 100.0 / NULLIF(FIRST_ITER_SCS_CNT + FIRST_ITER_FAIL_CNT, 0), 2) AS rej_rec_ratio,
+                    ROUND((NEXT_ITER_SCS_CNT - FIRST_ITER_SCS_CNT) * 100.0 / NULLIF(FIRST_ITER_FAIL_CNT, 0), 2) AS retry_resolution_rate,
+                    SCS_PERCENT
+                FROM metrics
+                WHERE MARKET IN ({placeholders})
+                ORDER BY MARKET, STRPTIME(MONTH, '%m-%Y') DESC
+            """
+        try:
+            rec_df = query(rec_sql)
+            record_level_metrics = rec_df.to_dict(orient="records")
+            # Latest snapshot per market
+            for row in record_level_metrics:
+                mkt = str(row.get("MARKET") or row.get("market") or "")
+                if mkt and mkt not in rec_summary:
+                    rec_summary[mkt] = {
+                        "latest_month":         row.get("MONTH") or row.get("month"),
+                        "tot_rec_cnt":          row.get("TOT_REC_CNT") or row.get("tot_rec_cnt"),
+                        "scs_rec_cnt":          row.get("scs_rec_cnt"),
+                        "fail_rec_cnt":         row.get("fail_rec_cnt"),
+                        "rej_rec_cnt":          row.get("rej_rec_cnt"),
+                        "scs_rec_ratio":        row.get("scs_rec_ratio"),
+                        "fail_rec_ratio":       row.get("fail_rec_ratio"),
+                        "rej_rec_ratio":        row.get("rej_rec_ratio"),
+                        "retry_resolution_rate": row.get("retry_resolution_rate"),
+                        "scs_percent":          row.get("SCS_PERCENT") or row.get("scs_percent"),
+                    }
+        except Exception:
+            record_level_metrics = []
+
+    flagged = stats_df[stats_df["failure_rate"] > threshold] if not stats_df.empty else pd.DataFrame()
     chart = create_failure_breakdown(stats_df, failure_df) if not stats_df.empty else None
 
     filter_desc = f"state={state}" if state else f"org={org}" if org else "all"
+    avg_scs = (
+        round(sum(v["scs_rec_ratio"] or 0 for v in rec_summary.values()) / max(len(rec_summary), 1), 1)
+        if rec_summary else None
+    )
     return {
         "procedure": "record_quality_audit",
         "filter": filter_desc,
+        # Per-org file-level quality with composite quality_score (0-100)
         "quality_stats": stats_df.to_dict(orient="records"),
+        # Per-stage RED flag breakdown per org
         "red_flag_counts": red_df.to_dict(orient="records"),
+        # Failure status/category distribution
         "failure_breakdown": failure_df.to_dict(orient="records"),
+        # PS-aligned record-level ratios: SCS_REC_RATIO, FAIL_REC_RATIO, REJ_REC_RATIO per market/month
+        "record_level_metrics": record_level_metrics,
+        "record_level_summary": rec_summary,
+        # Orgs exceeding failure threshold
         "flagged_above_threshold": flagged.to_dict(orient="records"),
         "threshold": threshold,
         "chart": chart,
-        "summary": f"Audited {len(stats_df)} orgs ({filter_desc}). {len(flagged)} exceed {threshold}% failure threshold.",
+        "summary": (
+            f"Audited {len(stats_df)} orgs ({filter_desc}). "
+            f"{len(flagged)} exceed {threshold}% failure threshold. "
+            + (f"Record-level avg SCS ratio = {avg_scs}% across {len(rec_summary)} market(s)."
+               if avg_scs is not None else "No record-level metrics for this filter.")
+        ),
     }
 
 
@@ -791,7 +903,7 @@ def _execute_pipeline_health_report(procedure: dict, params: dict) -> dict:
 
 
 def _execute_root_cause(procedure: dict, params: dict) -> dict:
-    """Trace root cause: market SCS_PERCENT low → pipeline failures → orgs/source/LOB."""
+    """Enhanced root cause trace with correlation scoring across stage, source, LOB, and retry dimensions."""
     market = params.get("market") or params.get("state")
 
     if not market:
@@ -802,59 +914,313 @@ def _execute_root_cause(procedure: dict, params: dict) -> dict:
         """)
         market = str(worst_market.iloc[0]["MARKET"]) if not worst_market.empty else "NY"
 
+    # ── 1. Market SCS trend ──
     market_scs = query(f"""
-        SELECT MARKET, MONTH, SCS_PERCENT, SCS_PERCENT - LAG(SCS_PERCENT) OVER (ORDER BY MONTH_DATE) as scs_change
+        SELECT MARKET, MONTH, SCS_PERCENT,
+               ROUND(SCS_PERCENT - LAG(SCS_PERCENT) OVER (ORDER BY MONTH_DATE), 2) as scs_change,
+               FIRST_ITER_FAIL_CNT, NEXT_ITER_SCS_CNT, FIRST_ITER_SCS_CNT,
+               OVERALL_SCS_CNT, OVERALL_FAIL_CNT
         FROM metrics WHERE MARKET = '{market}'
         ORDER BY MONTH_DATE DESC LIMIT 6
     """)
 
+    # ── 2. Baseline failure stats for this market ──
+    baseline = query(f"""
+        SELECT COUNT(*) as total_ros, SUM(IS_FAILED) as total_failed,
+               SUM(IS_STUCK) as total_stuck, SUM(IS_RETRY) as total_retry,
+               ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 4) as baseline_failure_rate
+        FROM roster WHERE CNT_STATE = '{market}'
+    """)
+    baseline_row = baseline.iloc[0].to_dict() if not baseline.empty else {}
+    total_ros = int(baseline_row.get("total_ros") or 1)
+    total_failed = int(baseline_row.get("total_failed") or 0)
+    baseline_fail_rate = float(baseline_row.get("baseline_failure_rate") or 0)
+
+    # ── 3. Stage blame / contribution scores ──
+    # blame_pct: % of failed ROs that have RED at this stage (how much each stage "blames" for failures)
+    # lift: enrichment ratio — how much more likely to see RED at this stage among failures vs. all ROs
+    stage_blame = query(f"""
+        SELECT stage, failed_with_red, total_failed_mkt, total_red, total_mkt,
+               ROUND(failed_with_red * 100.0 / NULLIF(total_failed_mkt, 0), 2) as blame_pct,
+               ROUND(total_red * 100.0 / NULLIF(total_mkt, 0), 2) as overall_red_pct,
+               ROUND(
+                   (failed_with_red * 1.0 / NULLIF(total_failed_mkt, 0))
+                   / NULLIF(total_red * 1.0 / NULLIF(total_mkt, 0), 0)
+               , 2) as lift
+        FROM (
+            SELECT 'PRE_PROCESSING' as stage,
+                SUM(CASE WHEN PRE_PROCESSING_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END) as failed_with_red,
+                SUM(IS_FAILED) as total_failed_mkt,
+                SUM(CASE WHEN PRE_PROCESSING_HEALTH='RED' THEN 1 ELSE 0 END) as total_red,
+                COUNT(*) as total_mkt
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'MAPPING_APROVAL',
+                SUM(CASE WHEN MAPPING_APROVAL_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN MAPPING_APROVAL_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'ISF_GEN',
+                SUM(CASE WHEN ISF_GEN_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN ISF_GEN_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'DART_GEN',
+                SUM(CASE WHEN DART_GEN_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_GEN_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'DART_REVIEW',
+                SUM(CASE WHEN DART_REVIEW_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_REVIEW_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'DART_UI_VALIDATION',
+                SUM(CASE WHEN DART_UI_VALIDATION_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN DART_UI_VALIDATION_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+            UNION ALL
+            SELECT 'SPS_LOAD',
+                SUM(CASE WHEN SPS_LOAD_HEALTH='RED' AND IS_FAILED=1 THEN 1 ELSE 0 END),
+                SUM(IS_FAILED), SUM(CASE WHEN SPS_LOAD_HEALTH='RED' THEN 1 ELSE 0 END), COUNT(*)
+            FROM roster WHERE CNT_STATE = '{market}'
+        ) t
+        WHERE total_red > 0
+        ORDER BY lift DESC NULLS LAST, blame_pct DESC
+    """)
+
+    # ── 4. Source system driver scores ──
+    # driver_score = geometric mean of failure_rate and share_of_failures
+    # High score = high failure rate AND high share of all failures (both required)
+    source_scores = query(f"""
+        SELECT SRC_SYS,
+               COUNT(*) as total,
+               SUM(IS_FAILED) as failed,
+               ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+               ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as share_of_failures,
+               ROUND(SQRT(
+                   (SUM(IS_FAILED) * 100.0 / NULLIF(COUNT(*), 0))
+                   * (SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0))
+               ), 2) as driver_score
+        FROM roster WHERE CNT_STATE = '{market}'
+        GROUP BY SRC_SYS
+        HAVING SUM(IS_FAILED) > 0
+        ORDER BY driver_score DESC
+    """)
+
+    # compute lift vs. baseline failure rate in Python (avoids SQL float embedding issues)
+    if not source_scores.empty and baseline_fail_rate > 0:
+        source_scores["lift"] = (source_scores["failure_rate"] / baseline_fail_rate).round(2)
+    else:
+        source_scores["lift"] = None
+
+    # ── 5. LOB driver scores ──
     try:
-        file_failures = query(f"""
-            SELECT CNT_STATE, ORG_NM, SRC_SYS, COALESCE(LOB_PRIMARY, SPLIT_PART(LOB, ',', 1)) as LOB_KEY,
-                   COUNT(*) as failed_count,
-                   ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as failure_rate
-            FROM roster WHERE CNT_STATE = '{market}' AND IS_FAILED = 1
-            GROUP BY CNT_STATE, ORG_NM, SRC_SYS, LOB_KEY
-            ORDER BY failed_count DESC LIMIT 15
+        lob_scores = query(f"""
+            SELECT COALESCE(LOB_PRIMARY, 'UNKNOWN') as LOB,
+                   COUNT(*) as total,
+                   SUM(IS_FAILED) as failed,
+                   ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+                   ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as share_of_failures,
+                   ROUND(SQRT(
+                       (SUM(IS_FAILED) * 100.0 / NULLIF(COUNT(*), 0))
+                       * (SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0))
+                   ), 2) as driver_score
+            FROM roster WHERE CNT_STATE = '{market}'
+            GROUP BY LOB_PRIMARY
+            HAVING SUM(IS_FAILED) > 0
+            ORDER BY driver_score DESC
+            LIMIT 10
+        """)
+        if not lob_scores.empty and baseline_fail_rate > 0:
+            lob_scores["lift"] = (lob_scores["failure_rate"] / baseline_fail_rate).round(2)
+        else:
+            lob_scores["lift"] = None
+    except Exception:
+        lob_scores = pd.DataFrame()
+
+    # ── 6. Retry pattern impact ──
+    retry_market = query(f"""
+        SELECT SUM(IS_RETRY) as total_retry,
+               SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) as retry_success,
+               ROUND(SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) * 100.0
+                     / NULLIF(SUM(IS_RETRY), 0), 2) as retry_success_rate
+        FROM roster WHERE CNT_STATE = '{market}'
+    """)
+    retry_global = query("""
+        SELECT ROUND(SUM(CASE WHEN IS_RETRY=1 AND IS_FAILED=0 THEN 1 ELSE 0 END) * 100.0
+                     / NULLIF(SUM(IS_RETRY), 0), 2) as retry_success_rate
+        FROM roster
+    """)
+
+    retry_market_row = retry_market.iloc[0].to_dict() if not retry_market.empty else {}
+    retry_global_row = retry_global.iloc[0].to_dict() if not retry_global.empty else {}
+    market_retry_rate = float(retry_market_row.get("retry_success_rate") or 0)
+    global_retry_rate = float(retry_global_row.get("retry_success_rate") or 0)
+    retry_gap = round(global_retry_rate - market_retry_rate, 2)
+
+    # metrics-level retry lift trend
+    try:
+        metrics_retry = query(f"""
+            SELECT MONTH, ROUND(RETRY_LIFT_PCT, 2) as retry_lift_pct, SCS_PERCENT
+            FROM metrics WHERE MARKET = '{market}'
+            ORDER BY MONTH_DATE DESC LIMIT 6
         """)
     except Exception:
-        file_failures = query(f"""
-            SELECT CNT_STATE, ORG_NM, SRC_SYS,
-                   COUNT(*) as failed_count,
-                   ROUND(SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*100.0/COUNT(*), 2) as failure_rate
-            FROM roster WHERE CNT_STATE = '{market}' AND IS_FAILED = 1
-            GROUP BY CNT_STATE, ORG_NM, SRC_SYS
-            ORDER BY failed_count DESC LIMIT 15
-        """)
-        file_failures["LOB_KEY"] = ""
+        metrics_retry = pd.DataFrame()
 
-    lob_col = "LOB_KEY" if "LOB_KEY" in file_failures.columns else "LOB_PRIMARY"
+    retry_impact = {
+        "market_retry_success_rate": market_retry_rate,
+        "global_retry_success_rate": global_retry_rate,
+        "retry_effectiveness_gap": retry_gap,
+        "interpretation": (
+            f"Market {market} retry success rate ({market_retry_rate}%) is "
+            + ("significantly below" if retry_gap > 10 else "slightly below" if retry_gap > 5 else "near")
+            + f" global avg ({global_retry_rate}%). "
+            + ("Retries are notably less effective here — failures may be systemic/structural." if retry_gap > 10
+               else "Retry effectiveness is within normal range.")
+        ),
+        "market_retry_lift_trend": metrics_retry.where(metrics_retry.notna(), None).to_dict(orient="records") if not metrics_retry.empty else [],
+    }
 
-    top_orgs = file_failures.groupby("ORG_NM")["failed_count"].sum().sort_values(ascending=False).head(5)
-    top_sources = file_failures.groupby("SRC_SYS")["failed_count"].sum().sort_values(ascending=False).head(5)
-    top_lobs = file_failures.groupby(lob_col)["failed_count"].sum().sort_values(ascending=False).head(5) if lob_col in file_failures.columns else pd.Series(dtype=float)
+    # ── 7. Cross-dimension hotspots: source system × pipeline stage ──
+    cross_dim = query(f"""
+        SELECT SRC_SYS, LATEST_STAGE_NM,
+               COUNT(*) as total,
+               SUM(IS_FAILED) as failed,
+               ROUND(SUM(IS_FAILED) * 100.0 / COUNT(*), 2) as failure_rate,
+               ROUND(SUM(IS_FAILED) * 100.0 / NULLIF({total_failed}, 0), 2) as pct_of_all_failures
+        FROM roster WHERE CNT_STATE = '{market}'
+        GROUP BY SRC_SYS, LATEST_STAGE_NM
+        HAVING SUM(IS_FAILED) >= 2
+        ORDER BY failure_rate DESC, failed DESC
+        LIMIT 15
+    """)
 
+    # ── 8. Rank suspected drivers ──
+    ranked_drivers = []
+
+    if not stage_blame.empty:
+        for _, row in stage_blame.iterrows():
+            blame = float(row.get("blame_pct") or 0)
+            lift = float(row.get("lift") or 1)
+            if blame >= 20 or lift >= 1.3:
+                confidence = "HIGH" if (blame >= 40 or lift >= 2.0) else "MEDIUM"
+                ranked_drivers.append({
+                    "type": "stage_failure",
+                    "driver": str(row["stage"]),
+                    "metric": f"{blame}% of failed ROs have RED at this stage (lift={lift}x vs baseline)",
+                    "driver_score": round(blame * min(lift, 5) / 100, 4),
+                    "confidence": confidence,
+                })
+
+    if not source_scores.empty:
+        for _, row in source_scores.head(3).iterrows():
+            ds = float(row.get("driver_score") or 0)
+            rate = float(row.get("failure_rate") or 0)
+            share = float(row.get("share_of_failures") or 0)
+            if ds >= 5 and share >= 5:
+                confidence = "HIGH" if ds >= 20 else "MEDIUM"
+                ranked_drivers.append({
+                    "type": "source_system",
+                    "driver": str(row["SRC_SYS"]),
+                    "metric": f"{rate}% failure rate, {share}% of all market failures (driver_score={ds})",
+                    "driver_score": round(ds / 100, 4),
+                    "confidence": confidence,
+                })
+
+    if not lob_scores.empty:
+        for _, row in lob_scores.head(3).iterrows():
+            ds = float(row.get("driver_score") or 0)
+            rate = float(row.get("failure_rate") or 0)
+            share = float(row.get("share_of_failures") or 0)
+            if ds >= 5 and share >= 5:
+                confidence = "HIGH" if ds >= 20 else "MEDIUM"
+                ranked_drivers.append({
+                    "type": "lob",
+                    "driver": str(row["LOB"]),
+                    "metric": f"{rate}% failure rate, {share}% of all market failures (driver_score={ds})",
+                    "driver_score": round(ds / 100, 4),
+                    "confidence": confidence,
+                })
+
+    if retry_gap > 10:
+        ranked_drivers.append({
+            "type": "retry_ineffectiveness",
+            "driver": f"Retry strategy for {market}",
+            "metric": f"Market retry success {market_retry_rate}% vs global {global_retry_rate}% (gap={retry_gap}pp)",
+            "driver_score": round(min(retry_gap, 50) / 100, 4),
+            "confidence": "HIGH" if retry_gap > 20 else "MEDIUM",
+        })
+
+    ranked_drivers.sort(key=lambda x: x["driver_score"], reverse=True)
+
+    # ── 9. SCS decline context ──
+    scs_decline_context = {}
+    if not market_scs.empty and len(market_scs) >= 2:
+        latest_scs = float(market_scs.iloc[0]["SCS_PERCENT"])
+        prev_scs = float(market_scs.iloc[1]["SCS_PERCENT"])
+        scs_delta = round(latest_scs - prev_scs, 2)
+        trend = "declining" if scs_delta < -1 else "stable" if abs(scs_delta) <= 1 else "improving"
+        scs_decline_context = {
+            "latest_scs": latest_scs,
+            "prev_scs": prev_scs,
+            "delta": scs_delta,
+            "trend": trend,
+            "note": (
+                f"SCS {trend}: {'+' if scs_delta >= 0 else ''}{scs_delta}pp month-over-month. "
+                + ("Stage failures and source system issues are likely accelerating this decline." if scs_delta < -1
+                   else "SCS is stable — failures are chronic rather than acute.")
+            ),
+        }
+    elif not market_scs.empty:
+        scs_decline_context = {
+            "latest_scs": float(market_scs.iloc[0]["SCS_PERCENT"]),
+            "trend": "insufficient_history",
+        }
+
+    # ── 10. Build causal chain narrative ──
     chain = []
-    chain.append(f"1. **Market {market}** SCS_PERCENT: {market_scs.iloc[0]['SCS_PERCENT']}% (latest)" if not market_scs.empty else f"1. **Market {market}**")
-    chain.append(f"2. **Pipeline failures** in {market}: {len(file_failures)} org-source-LOB combinations with failures")
-    if not top_orgs.empty:
-        chain.append(f"3. **Top failing orgs**: {', '.join(top_orgs.index.tolist()[:3])}")
-    if not top_sources.empty:
-        chain.append(f"4. **Source systems**: {', '.join(str(s) for s in top_sources.index.tolist()[:3])}")
-    if not top_lobs.empty:
-        chain.append(f"5. **LOB concentration**: {', '.join(str(l) for l in top_lobs.index.tolist()[:3])}")
+    if not market_scs.empty:
+        chain.append(
+            f"1. **Market {market}** SCS_PERCENT: {market_scs.iloc[0]['SCS_PERCENT']}% (latest) "
+            f"— {scs_decline_context.get('trend', 'unknown')} trend"
+        )
+    chain.append(f"2. **Baseline failure rate**: {baseline_fail_rate}% ({total_failed}/{total_ros} ROs in this market)")
+    if ranked_drivers:
+        top = ranked_drivers[0]
+        chain.append(f"3. **Primary suspected driver**: {top['driver']} ({top['type']}, {top['confidence']} confidence) — {top['metric']}")
+        secondary = [d for d in ranked_drivers[1:3]]
+        if secondary:
+            chain.append(f"4. **Contributing factors**: {'; '.join(d['driver'] + ' (' + d['type'] + ')' for d in secondary)}")
+    if not cross_dim.empty:
+        worst = cross_dim.iloc[0]
+        chain.append(f"5. **Hotspot**: {worst['SRC_SYS']} × {worst['LATEST_STAGE_NM']} — {worst['failure_rate']}% failure rate, {worst['pct_of_all_failures']}% of all market failures")
+    chain.append(f"6. **Retry impact**: {retry_impact['interpretation']}")
 
-    return {
+    top_driver_name = ranked_drivers[0]["driver"] if ranked_drivers else "N/A"
+    top_driver_conf = ranked_drivers[0]["confidence"] if ranked_drivers else "N/A"
+
+    return _sanitize_nan({
         "procedure": "trace_root_cause",
         "market": market,
         "causal_chain": chain,
+        "scs_decline_context": scs_decline_context,
         "market_trend": market_scs.to_dict(orient="records"),
-        "file_failures_by_org_source_lob": file_failures.to_dict(orient="records"),
-        "top_orgs": top_orgs.to_dict(),
-        "top_sources": top_sources.to_dict(),
-        "top_lobs": top_lobs.to_dict(),
-        "summary": f"Root cause trace for {market}: low SCS → {len(file_failures)} failure combos. Top orgs: {', '.join(top_orgs.index.tolist()[:2]) if not top_orgs.empty else 'N/A'}.",
-    }
+        "baseline_stats": {k: (0 if pd.isna(v) else v) for k, v in baseline_row.items()},
+        "stage_blame_scores": stage_blame.where(stage_blame.notna(), None).to_dict(orient="records"),
+        "source_driver_scores": source_scores.where(source_scores.notna(), None).to_dict(orient="records"),
+        "lob_driver_scores": lob_scores.where(lob_scores.notna(), None).to_dict(orient="records") if not lob_scores.empty else [],
+        "retry_impact": retry_impact,
+        "cross_dimension_hotspots": cross_dim.where(cross_dim.notna(), None).to_dict(orient="records"),
+        "ranked_drivers": ranked_drivers,
+        "summary": (
+            f"Root cause trace for {market}: SCS={market_scs.iloc[0]['SCS_PERCENT'] if not market_scs.empty else 'N/A'}%, "
+            f"baseline failure rate={baseline_fail_rate}%. "
+            f"Top driver: {top_driver_name} ({top_driver_conf} confidence). "
+            f"{len(ranked_drivers)} suspected drivers ranked by correlation score."
+        ),
+    })
 
 
 def _execute_rejection_clustering(procedure: dict, params: dict) -> dict:
