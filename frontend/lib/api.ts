@@ -26,6 +26,14 @@ export interface ToolCall {
   };
 }
 
+export interface ProcedureUpdate {
+  procedure_name: string;
+  old_version: number;
+  new_version: number;
+  changes: Record<string, string>;
+  change_description: string;
+}
+
 export interface ChatResponse {
   message: string;
   charts: Record<string, unknown>[];
@@ -36,6 +44,7 @@ export interface ChatResponse {
   web_search_results: { query: string; results: { title: string; url: string; content: string }[] }[];
   tool_calls: ToolCall[];
   procedure_used: string | null;
+  procedure_updates: ProcedureUpdate[];
   agent_used: string | null;
   session_id: string;
 }

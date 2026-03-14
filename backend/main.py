@@ -90,6 +90,7 @@ class ChatResponse(BaseModel):
     web_search_results: list[dict] = []
     tool_calls: list[dict] = []
     procedure_used: str | None = None
+    procedure_updates: list[dict] = []
     agent_used: str | None = None
     session_id: str = ""
 
@@ -149,6 +150,7 @@ async def chat(request: ChatRequest):
             web_search_results=result.get("web_search_results", []),
             tool_calls=tool_calls,
             procedure_used=result.get("procedure_used"),
+            procedure_updates=result.get("procedure_updates", []),
             agent_used=result.get("agent_used"),
             session_id=session_id,
         )

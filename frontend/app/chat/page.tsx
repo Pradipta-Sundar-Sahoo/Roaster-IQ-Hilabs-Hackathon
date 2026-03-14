@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { sendChat, getSessionBriefing, getProceduralMemory, createProcedure, type ChatResponse, type ToolCall } from "@/lib/api";
+import { sendChat, getSessionBriefing, getProceduralMemory, createProcedure, type ChatResponse, type ToolCall, type ProcedureUpdate } from "@/lib/api";
 import { PlotlyChart } from "@/components/charts/PlotlyChart";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +36,7 @@ interface Message {
   memoryUpdates?: ChatResponse["memory_updates"];
   toolCalls?: ToolCall[];
   procedureUsed?: string | null;
+  procedureUpdates?: ProcedureUpdate[];
   agentUsed?: string | null;
   isBriefing?: boolean;
 }
@@ -278,6 +279,105 @@ function ToolCallsSection({ toolCalls }: { toolCalls: ToolCall[] }) {
   );
 }
 
+function ProcedureLearningCard({ updates }: { updates: ProcedureUpdate[] }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (updates.length === 0) return null;
+
+  const CHANGE_LABELS: Record<string, string> = {
+    steps: "Steps updated",
+    parameters: "Parameters updated",
+    description: "Description changed",
+    add_step: "New step added",
+    modify_step: "Step modified",
+    summary: "Change reason",
+  };
+
+  return (
+    <div className="rounded-xl border border-emerald-200/60 bg-emerald-500/5 overflow-hidden shadow-sm">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2.5 px-5 py-3 text-left hover:bg-emerald-500/10 transition-colors cursor-pointer"
+      >
+        {expanded ? (
+          <ChevronDown className="w-4 h-4 text-emerald-600 shrink-0" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-emerald-600 shrink-0" />
+        )}
+        <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+        <span className="text-xs font-semibold text-emerald-800">
+          Procedural Learning — {updates.length} procedure{updates.length > 1 ? "s" : ""} updated
+        </span>
+        <div className="flex gap-1.5 ml-auto flex-wrap">
+          {updates.map((u, i) => (
+            <Badge
+              key={i}
+              variant="outline"
+              className="text-[10px] border border-emerald-300/60 bg-emerald-50 text-emerald-700"
+            >
+              {u.procedure_name.replace(/_/g, " ")}
+            </Badge>
+          ))}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-emerald-200/50 divide-y divide-emerald-100/50">
+          {updates.map((u, i) => (
+            <div key={i} className="px-5 py-4 space-y-3">
+              {/* Header: procedure name + version badge */}
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-semibold text-emerald-900">
+                  {u.procedure_name.replace(/_/g, " ")}
+                </span>
+                <div className="flex items-center gap-1.5 text-[11px] font-mono">
+                  <span className="px-2 py-0.5 rounded-md bg-muted text-muted-foreground border border-border/50">
+                    v{u.old_version}
+                  </span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200/60 font-semibold">
+                    v{u.new_version}
+                  </span>
+                </div>
+              </div>
+
+              {/* What changed */}
+              {Object.keys(u.changes).length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wide">
+                    What changed
+                  </p>
+                  <ul className="space-y-1">
+                    {Object.entries(u.changes).map(([key, val]) => (
+                      <li key={key} className="flex items-start gap-2 text-xs text-emerald-900">
+                        <span className="mt-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                        <span>
+                          <span className="font-medium">{CHANGE_LABELS[key] ?? key}:</span>{" "}
+                          {String(val)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Why it changed */}
+              {u.change_description && (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wide">
+                    Why
+                  </p>
+                  <p className="text-xs text-emerald-800 leading-relaxed">{u.change_description}</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CreateProcedureModal({
   onClose,
   onCreated,
@@ -494,6 +594,7 @@ function ChatPageInner() {
         memoryUpdates: response.memory_updates,
         toolCalls: response.tool_calls,
         procedureUsed: response.procedure_used,
+        procedureUpdates: response.procedure_updates,
         agentUsed: response.agent_used,
       };
       setMessages((prev) => [...prev, assistantMsg]);
@@ -629,6 +730,10 @@ function ChatPageInner() {
 
                         {msg.toolCalls && msg.toolCalls.length > 0 && (
                           <ToolCallsSection toolCalls={msg.toolCalls} />
+                        )}
+
+                        {msg.procedureUpdates && msg.procedureUpdates.length > 0 && (
+                          <ProcedureLearningCard updates={msg.procedureUpdates} />
                         )}
 
                         <Card className="overflow-hidden border-border/50 shadow-sm">

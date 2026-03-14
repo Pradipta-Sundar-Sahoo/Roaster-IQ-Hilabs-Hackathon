@@ -236,6 +236,7 @@ class SupervisorAgent:
             except Exception as e:
                 print(f"  [supervisor] Formatter failed ({e}), using raw response")
 
+        procedure_updates = []
         for tr in tool_results:
             result = tr.get("result", {})
             if isinstance(result, dict):
@@ -247,6 +248,14 @@ class SupervisorAgent:
                     web_results.append(result)
                 if tr["tool"] == "run_procedure":
                     procedure_used = tr["args"].get("procedure_name")
+                if tr["tool"] == "update_procedure" and "new_version" in result:
+                    procedure_updates.append({
+                        "procedure_name": result.get("procedure", tr.get("args", {}).get("procedure_name", "")),
+                        "old_version": result.get("old_version"),
+                        "new_version": result.get("new_version"),
+                        "changes": result.get("changes", {}),
+                        "change_description": tr.get("args", {}).get("change_description", ""),
+                    })
 
         if not final_text:
             final_text = "I processed your query but couldn't generate a text response. Please try rephrasing."
@@ -285,6 +294,7 @@ class SupervisorAgent:
             "web_search_results": web_results,
             "tool_results": llm_result.get("tool_results", []),
             "procedure_used": procedure_used,
+            "procedure_updates": procedure_updates,
             "agent_used": agent_name,
         }
 
