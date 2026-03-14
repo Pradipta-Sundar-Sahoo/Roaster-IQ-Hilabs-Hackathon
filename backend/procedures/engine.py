@@ -270,7 +270,7 @@ def _execute_triage(procedure: dict, params: dict) -> dict:
 
 
 def _execute_quality_audit(procedure: dict, params: dict) -> dict:
-    """Execute record_quality_audit procedure — reads steps from JSON."""
+    """Execute record_quality_audit procedure — file-level flags + record-level ratios."""
     state = _get_param(procedure, params, "state")
     org = _get_param(procedure, params, "org")
     threshold = _get_param(procedure, params, "threshold", 5.0)
@@ -282,53 +282,165 @@ def _execute_quality_audit(procedure: dict, params: dict) -> dict:
         conditions.append(f"ORG_NM LIKE '%{org}%'")
     where = " AND ".join(conditions) if conditions else "1=1"
 
+    # ── 1. Per-org file-level stats + composite quality score ──
+    # QUALITY_SCORE = 60% health (avg HEALTH_SCORE / 14 max) + 40% non-failure rate
     stats_sql = _get_step_sql(procedure, "failure", f"""
-        SELECT CNT_STATE, ORG_NM,
-               COUNT(*) as total_files,
-               SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) as failed_files,
-               ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate
+        SELECT
+            CNT_STATE,
+            ORG_NM,
+            COUNT(*)                                                                   AS total_files,
+            SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END)                            AS failed_files,
+            SUM(CASE WHEN IS_STUCK  = 1 THEN 1 ELSE 0 END)                            AS stuck_files,
+            ROUND(SUM(CASE WHEN IS_FAILED = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS failure_rate,
+            ROUND(SUM(CASE WHEN IS_STUCK  = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS stuck_rate,
+            ROUND(AVG(RED_COUNT),    2)                                                AS avg_red_flags,
+            ROUND(AVG(YELLOW_COUNT), 2)                                                AS avg_yellow_flags,
+            ROUND(AVG(HEALTH_SCORE), 2)                                                AS avg_health_score,
+            ROUND(
+                0.6 * (AVG(HEALTH_SCORE) / 14.0 * 100)
+                + 0.4 * (1.0 - SUM(CASE WHEN IS_FAILED=1 THEN 1 ELSE 0 END)*1.0/COUNT(*)) * 100
+            , 1)                                                                       AS quality_score
         FROM roster WHERE {where}
         GROUP BY CNT_STATE, ORG_NM
-        ORDER BY failure_rate DESC LIMIT 50
+        ORDER BY quality_score ASC
+        LIMIT 50
     """)
     stats_df = query(stats_sql)
 
+    # ── 2. Per-stage RED flag counts per org ──
     red_sql = _get_step_sql(procedure, "red health", f"""
-        SELECT CNT_STATE, ORG_NM,
-               SUM(CASE WHEN PRE_PROCESSING_HEALTH = 'RED' THEN 1 ELSE 0 END) as pre_proc_red,
-               SUM(CASE WHEN MAPPING_APROVAL_HEALTH = 'RED' THEN 1 ELSE 0 END) as mapping_red,
-               SUM(CASE WHEN ISF_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as isf_red,
-               SUM(CASE WHEN DART_GEN_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_gen_red,
-               SUM(CASE WHEN DART_REVIEW_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_review_red,
-               SUM(CASE WHEN DART_UI_VALIDATION_HEALTH = 'RED' THEN 1 ELSE 0 END) as dart_ui_red,
-               SUM(CASE WHEN SPS_LOAD_HEALTH = 'RED' THEN 1 ELSE 0 END) as sps_red
+        SELECT
+            CNT_STATE,
+            ORG_NM,
+            SUM(CASE WHEN PRE_PROCESSING_HEALTH      = 'RED' THEN 1 ELSE 0 END) AS pre_proc_red,
+            SUM(CASE WHEN MAPPING_APROVAL_HEALTH      = 'RED' THEN 1 ELSE 0 END) AS mapping_red,
+            SUM(CASE WHEN ISF_GEN_HEALTH              = 'RED' THEN 1 ELSE 0 END) AS isf_red,
+            SUM(CASE WHEN DART_GEN_HEALTH             = 'RED' THEN 1 ELSE 0 END) AS dart_gen_red,
+            SUM(CASE WHEN DART_REVIEW_HEALTH          = 'RED' THEN 1 ELSE 0 END) AS dart_review_red,
+            SUM(CASE WHEN DART_UI_VALIDATION_HEALTH   = 'RED' THEN 1 ELSE 0 END) AS dart_ui_red,
+            SUM(CASE WHEN SPS_LOAD_HEALTH             = 'RED' THEN 1 ELSE 0 END) AS sps_red,
+            SUM(RED_COUNT)                                                         AS total_red_flags,
+            ROUND(AVG(RED_COUNT), 2)                                               AS avg_red_per_file
         FROM roster WHERE {where}
         GROUP BY CNT_STATE, ORG_NM
-        ORDER BY (pre_proc_red + mapping_red + isf_red + dart_gen_red + dart_review_red + dart_ui_red + sps_red) DESC
+        ORDER BY total_red_flags DESC
         LIMIT 50
     """)
     red_df = query(red_sql)
 
+    # ── 3. Failure breakdown by status + category ──
     failure_df = query(f"""
-        SELECT FAILURE_STATUS, COUNT(*) as cnt
+        SELECT FAILURE_STATUS, FAILURE_CATEGORY, COUNT(*) AS cnt
         FROM roster WHERE IS_FAILED = 1 AND {where}
-        GROUP BY FAILURE_STATUS ORDER BY cnt DESC
+        GROUP BY FAILURE_STATUS, FAILURE_CATEGORY
+        ORDER BY cnt DESC
     """)
 
-    flagged = stats_df[stats_df["failure_rate"] > threshold]
+    # ── 4. Record-level ratios from metrics (MARKET = CNT_STATE) ──
+    # PS metrics: FAIL_REC_CNT/TOT_REC_CNT, REJ_REC_CNT/TOT_REC_CNT, SCS_REC_CNT/TOT_REC_CNT
+    target_states = [state] if state else []
+    if not target_states and not org:
+        top_states = query("SELECT CNT_STATE FROM roster GROUP BY CNT_STATE ORDER BY COUNT(*) DESC LIMIT 5")
+        target_states = top_states["CNT_STATE"].tolist()
+    elif not target_states and org:
+        org_states = query(f"SELECT DISTINCT CNT_STATE FROM roster WHERE ORG_NM LIKE '%{org}%'")
+        target_states = org_states["CNT_STATE"].tolist()
+
+    record_level_metrics = []
+    rec_summary = {}
+    if target_states:
+        placeholders = ", ".join(f"'{s}'" for s in target_states)
+        # Use derived columns if enrichment succeeded, otherwise compute inline
+        cols_df = query("DESCRIBE metrics")
+        available_cols = set(cols_df["column_name"].str.upper().tolist())
+        if "SCS_REC_RATIO" in available_cols:
+            rec_sql = f"""
+                SELECT
+                    MARKET,
+                    MONTH,
+                    TOT_REC_CNT,
+                    OVERALL_SCS_CNT                  AS scs_rec_cnt,
+                    OVERALL_FAIL_CNT                 AS fail_rec_cnt,
+                    FIRST_ITER_FAIL_CNT              AS rej_rec_cnt,
+                    ROUND(SCS_REC_RATIO, 2)          AS scs_rec_ratio,
+                    ROUND(FAIL_REC_RATIO, 2)         AS fail_rec_ratio,
+                    ROUND(REJ_REC_RATIO, 2)          AS rej_rec_ratio,
+                    ROUND(RETRY_RESOLUTION_RATE, 2)  AS retry_resolution_rate,
+                    SCS_PERCENT
+                FROM metrics
+                WHERE MARKET IN ({placeholders})
+                ORDER BY MARKET, MONTH_DATE DESC
+            """
+        else:
+            rec_sql = f"""
+                SELECT
+                    MARKET,
+                    MONTH,
+                    (OVERALL_SCS_CNT + OVERALL_FAIL_CNT)                                                      AS TOT_REC_CNT,
+                    OVERALL_SCS_CNT                                                                            AS scs_rec_cnt,
+                    OVERALL_FAIL_CNT                                                                           AS fail_rec_cnt,
+                    FIRST_ITER_FAIL_CNT                                                                        AS rej_rec_cnt,
+                    ROUND(OVERALL_SCS_CNT  * 100.0 / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 2)       AS scs_rec_ratio,
+                    ROUND(OVERALL_FAIL_CNT * 100.0 / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 2)       AS fail_rec_ratio,
+                    ROUND(FIRST_ITER_FAIL_CNT * 100.0 / NULLIF(FIRST_ITER_SCS_CNT + FIRST_ITER_FAIL_CNT, 0), 2) AS rej_rec_ratio,
+                    ROUND((NEXT_ITER_SCS_CNT - FIRST_ITER_SCS_CNT) * 100.0 / NULLIF(FIRST_ITER_FAIL_CNT, 0), 2) AS retry_resolution_rate,
+                    SCS_PERCENT
+                FROM metrics
+                WHERE MARKET IN ({placeholders})
+                ORDER BY MARKET, STRPTIME(MONTH, '%m-%Y') DESC
+            """
+        try:
+            rec_df = query(rec_sql)
+            record_level_metrics = rec_df.to_dict(orient="records")
+            # Latest snapshot per market
+            for row in record_level_metrics:
+                mkt = str(row.get("MARKET") or row.get("market") or "")
+                if mkt and mkt not in rec_summary:
+                    rec_summary[mkt] = {
+                        "latest_month":         row.get("MONTH") or row.get("month"),
+                        "tot_rec_cnt":          row.get("TOT_REC_CNT") or row.get("tot_rec_cnt"),
+                        "scs_rec_cnt":          row.get("scs_rec_cnt"),
+                        "fail_rec_cnt":         row.get("fail_rec_cnt"),
+                        "rej_rec_cnt":          row.get("rej_rec_cnt"),
+                        "scs_rec_ratio":        row.get("scs_rec_ratio"),
+                        "fail_rec_ratio":       row.get("fail_rec_ratio"),
+                        "rej_rec_ratio":        row.get("rej_rec_ratio"),
+                        "retry_resolution_rate": row.get("retry_resolution_rate"),
+                        "scs_percent":          row.get("SCS_PERCENT") or row.get("scs_percent"),
+                    }
+        except Exception:
+            record_level_metrics = []
+
+    flagged = stats_df[stats_df["failure_rate"] > threshold] if not stats_df.empty else pd.DataFrame()
     chart = create_failure_breakdown(stats_df, failure_df) if not stats_df.empty else None
 
     filter_desc = f"state={state}" if state else f"org={org}" if org else "all"
+    avg_scs = (
+        round(sum(v["scs_rec_ratio"] or 0 for v in rec_summary.values()) / max(len(rec_summary), 1), 1)
+        if rec_summary else None
+    )
     return {
         "procedure": "record_quality_audit",
         "filter": filter_desc,
+        # Per-org file-level quality with composite quality_score (0-100)
         "quality_stats": stats_df.to_dict(orient="records"),
+        # Per-stage RED flag breakdown per org
         "red_flag_counts": red_df.to_dict(orient="records"),
+        # Failure status/category distribution
         "failure_breakdown": failure_df.to_dict(orient="records"),
+        # PS-aligned record-level ratios: SCS_REC_RATIO, FAIL_REC_RATIO, REJ_REC_RATIO per market/month
+        "record_level_metrics": record_level_metrics,
+        "record_level_summary": rec_summary,
+        # Orgs exceeding failure threshold
         "flagged_above_threshold": flagged.to_dict(orient="records"),
         "threshold": threshold,
         "chart": chart,
-        "summary": f"Audited {len(stats_df)} orgs ({filter_desc}). {len(flagged)} exceed {threshold}% failure threshold.",
+        "summary": (
+            f"Audited {len(stats_df)} orgs ({filter_desc}). "
+            f"{len(flagged)} exceed {threshold}% failure threshold. "
+            + (f"Record-level avg SCS ratio = {avg_scs}% across {len(rec_summary)} market(s)."
+               if avg_scs is not None else "No record-level metrics for this filter.")
+        ),
     }
 
 

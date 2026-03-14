@@ -225,6 +225,32 @@ def _preprocess_tables(conn: duckdb.DuckDBPyConnection):
                     / NULLIF(FIRST_ITER_SCS_CNT, 0), 4
                 ) AS RETRY_LIFT_PCT,
 
+                -- Record-level counts
+                (OVERALL_SCS_CNT + OVERALL_FAIL_CNT) AS TOT_REC_CNT,
+
+                -- Record-level ratios (PS-aligned: SCS/FAIL/REJ per total records)
+                ROUND(
+                    OVERALL_SCS_CNT * 100.0
+                    / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 4
+                ) AS SCS_REC_RATIO,
+
+                ROUND(
+                    OVERALL_FAIL_CNT * 100.0
+                    / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 4
+                ) AS FAIL_REC_RATIO,
+
+                -- First-pass rejection rate (records rejected before any retry)
+                ROUND(
+                    FIRST_ITER_FAIL_CNT * 100.0
+                    / NULLIF(FIRST_ITER_SCS_CNT + FIRST_ITER_FAIL_CNT, 0), 4
+                ) AS REJ_REC_RATIO,
+
+                -- Retry resolution: how many initially-rejected records were resolved by retries
+                ROUND(
+                    (NEXT_ITER_SCS_CNT - FIRST_ITER_SCS_CNT) * 100.0
+                    / NULLIF(FIRST_ITER_FAIL_CNT, 0), 4
+                ) AS RETRY_RESOLUTION_RATE,
+
                 ROUND(
                     OVERALL_FAIL_CNT * 100.0
                     / NULLIF(OVERALL_SCS_CNT + OVERALL_FAIL_CNT, 0), 4
